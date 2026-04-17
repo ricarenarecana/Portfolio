@@ -1,16 +1,19 @@
-# Mini Elevator Project
+# ESP32 Mini Elevator
 
-This project demonstrates a mini elevator system using OLED displays with both ESP and Arduino UNO microcontrollers.
+This folder contains the ESP32 version of the Mini Elevator Project. It demonstrates controlling a mini elevator mechanism and displaying status or sensor data on an OLED display using an ESP32 microcontroller.
+
+## Contents
+- ESP32.ino — Main ESP32 code
+- README.md — This file
 
 ## Features
 - Controls a mini elevator mechanism
-- Displays status and sensor data on OLED screens
-- Includes code for both ESP and Arduino UNO platforms
+- Displays status and sensor data on an OLED screen
 
 ## How to Use
-- For ESP: Upload the `.ino` file in the `OLED_ESP_FINAL_NA` folder to your ESP board.
-- For Arduino UNO: Upload the `.ino` file in the `OLED_UNO_FINAL_NA` folder to your Arduino UNO.
-- Connect the OLED display as described in the code comments for each platform.
+1. Open `ESP32.ino` in the Arduino IDE or PlatformIO.
+2. Upload to your ESP32 board.
+3. Connect the OLED display as described in the code comments.
 
 ---
 

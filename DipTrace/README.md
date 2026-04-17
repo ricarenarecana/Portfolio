@@ -1,15 +1,23 @@
-# Portfolio
+# DipTrace Projects
 
-Welcome to my portfolio repository! Here you will find a collection of my projects, each with its own code and documentation. Browse the list below to explore each project.
+This folder contains various electronic circuit designs created with DipTrace. Each file represents a schematic or PCB layout for a specific project.
 
-## Projects
+## Contents
 
-- [Robotics: Gantry Style Robot (SodaBot)](auto_can_system/README.md): Automated gantry-style robot system with firmware, web interface, and tests.
-- [Garden_Automization_and_Growth_Optimization](Garden_Automization_and_Growth_Optimization/README.md): Automated garden system for growth optimization.
-- [Mini Elevator Project](OLED_ESP_FINAL_NA/README.md): Mini elevator project using OLED displays with ESP and Arduino UNO microcontrollers.
+- GUTAR-PREAMP.dch — Guitar preamp schematic
+- GUTAR-PREAMP.dip — Guitar preamp PCB layout
+- Microphone Pre Amp.dch — Microphone preamp schematic
+- Microphone Pre Amp.dip — Microphone preamp PCB layout
+- Stereo Amplifier 100Wx100W.dip — Stereo amplifier PCB layout
+- VU Meter SMD.dch — VU meter schematic (SMD version)
+- VU Meter THT.dch — VU meter schematic (THT version)
+- VU Meter.dip — VU meter PCB layout
+- README.md — This file
 
-Each project folder contains its own README with more details.
+## How to Use
+
+Open the `.dch` files in DipTrace Schematic Editor and the `.dip` files in DipTrace PCB Layout. Modify or export as needed for your hardware projects.
 
 ---
 
-Feel free to explore the code and reach out if you have any questions!
+For more information on each design, open the corresponding file in DipTrace and review the schematic or layout details.
