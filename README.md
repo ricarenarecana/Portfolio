@@ -1,7 +1,6 @@
-# Portfolio Projects
+# Portfolio
 
 Welcome to my portfolio repository! Here you will find a collection of my projects, each with its own code and documentation. Browse the list below to explore each project.
-
 
 ## Projects
 
