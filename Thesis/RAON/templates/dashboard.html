@@ -1,0 +1,1717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAON - Inventory Dashboard</title>
+    <script src="{{ url_for('static', filename='js/chart.umd.min.js') }}"></script>
+    <script>
+        if (typeof Chart === 'undefined') {
+            document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js"><\\/script>');
+        }
+    </script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            background: radial-gradient(circle at 20% 20%, #eef2ff 0, #eef2ff 20%, #f7f9fc 45%, #f5f7fb 100%);
+            color: #1f2a44;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header h1 { font-size: 28px; }
+        .header-right { display: flex; gap: 15px; align-items: center; }
+        .refresh-time { font-size: 12px; opacity: 0.9; }
+        
+        .container {
+            max-width: 1400px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .stat-label { font-size: 12px; color: #999; font-weight: bold; }
+        .stat-value { font-size: 32px; font-weight: bold; color: #333; margin: 10px 0; }
+        .stat-icon { font-size: 32px; margin-bottom: 10px; }
+        
+        .machines-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(500px, 1fr));
+            gap: 20px;
+        }
+        
+        .machine-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .machine-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .machine-header h2 { font-size: 20px; color: #333; }
+        .status-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            background: #27ae60;
+            color: white;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        
+        .machine-stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .stat-box {
+            background: #f9f9f9;
+            padding: 10px;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+        }
+        
+        .stat-label-small { font-size: 11px; color: #999; }
+        .stat-value-small { font-size: 16px; font-weight: bold; color: #333; margin-top: 3px; }
+        
+        .low-stock-alert {
+            background: #ffe8e8;
+            border-left: 4px solid #e74c3c;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        
+        .alert-items { color: #d35400; }
+        
+        .items-sold {
+            background: #f0f8ff;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .coin-stock-box {
+            background: #fff8e8;
+            border-left: 4px solid #f39c12;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+
+        .coin-stock-line {
+            margin-top: 4px;
+            color: #555;
+        }
+
+        .coin-status-ok { color: #27ae60; font-weight: bold; }
+        .coin-status-low { color: #f39c12; font-weight: bold; }
+        .coin-status-out { color: #e74c3c; font-weight: bold; }
+        
+        .items-sold-title { font-weight: bold; color: #333; margin-bottom: 5px; }
+        .items-sold-list { color: #667eea; }
+        
+        .logs-section {
+            background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 8px 26px rgba(0,0,0,0.08);
+            margin-top: 20px;
+            border: 1px solid #eef1f7;
+        }
+
+        .alert-banner {
+            display: none;
+            align-items: center;
+            gap: 12px;
+            background: #fef2f2;
+            color: #b91c1c;
+            border: 1px solid #fecdd3;
+            border-radius: 10px;
+            padding: 12px 16px;
+            margin-bottom: 14px;
+            font-weight: 700;
+        }
+        .alert-dot {
+            width: 12px; height: 12px; border-radius: 50%;
+            background: #ef4444;
+        }
+        
+        .logs-section h3 { margin-bottom: 12px; color: #1f2a44; font-weight: 700; }
+        
+        .logs-container {
+            max-height: 420px;
+            overflow-y: auto;
+            background: #f7f9fc;
+            padding: 12px;
+            border-radius: 10px;
+            font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            border: 1px solid #e5e9f2;
+        }
+        
+        .log-line {
+            padding: 8px 10px;
+            border-bottom: 1px solid #e9edf5;
+            white-space: pre-wrap;
+            word-break: break-word;
+            transition: background 0.15s ease, transform 0.1s ease;
+            border-radius: 6px;
+        }
+        
+        .log-line:nth-child(odd) { background: #fbfcff; }
+        .log-line:hover { background: #eef3ff; transform: translateX(2px); }
+        
+        .chart-section {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-top: 20px;
+        }
+        
+        .chart-section h3 { margin-bottom: 15px; color: #333; }
+        
+        .chart-container {
+            position: relative;
+            height: 400px;
+            margin-bottom: 20px;
+        }
+        
+        .sensor-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .sensor-stat-box {
+            background: #f9f9f9;
+            padding: 12px;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+            text-align: center;
+        }
+        
+        .sensor-stat-label { font-size: 11px; color: #999; font-weight: bold; }
+        .sensor-stat-value { font-size: 18px; font-weight: bold; color: #333; margin-top: 5px; }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #eee;
+        }
+        
+        .tab-button {
+            padding: 10px 20px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            color: #666;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+        }
+        
+        .tab-button.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+            font-weight: bold;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .previous-day-logs {
+            background: #fafafa;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .alert-item {
+            background: white;
+            border-left: 4px solid #e74c3c;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .alert-item.critical {
+            background: #ffe8e8;
+            border-left-color: #c0392b;
+        }
+        
+        .alert-item.warning {
+            background: #fff8f0;
+            border-left-color: #f39c12;
+        }
+        
+        .alert-info {
+            flex: 1;
+        }
+        
+        .alert-title {
+            font-weight: bold;
+            color: #c0392b;
+            margin-bottom: 3px;
+        }
+        
+        .alert-message {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .alert-time {
+            font-size: 11px;
+            color: #999;
+            margin-top: 3px;
+        }
+        
+        .alert-actions {
+            display: flex;
+            gap: 8px;
+            margin-left: 10px;
+        }
+        
+        .acknowledge-btn {
+            padding: 6px 12px;
+            background: #27ae60;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        
+        .acknowledge-btn:hover {
+            background: #229954;
+        }
+
+        .dispense-timeout-panel {
+            background: #fff0f0;
+            border: 3px solid #c0392b;
+            border-radius: 10px;
+            padding: 18px;
+            margin-bottom: 24px;
+        }
+
+        .dispense-timeout-title {
+            font-size: 28px;
+            font-weight: 900;
+            color: #a5281b;
+            margin-bottom: 8px;
+        }
+
+        .dispense-timeout-text {
+            font-size: 34px;
+            line-height: 1.2;
+            font-weight: 900;
+            color: #7a1c12;
+            margin-bottom: 12px;
+        }
+
+        .dispense-timeout-meta {
+            font-size: 15px;
+            color: #5d5d5d;
+            margin-bottom: 14px;
+        }
+
+        .dispense-timeout-ok-btn {
+            padding: 12px 28px;
+            font-size: 20px;
+            font-weight: 900;
+            background: #c0392b;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .dispense-timeout-ok-btn:hover {
+            background: #a93226;
+        }
+
+        .admin-clear-btn {
+            padding: 10px 20px;
+            font-size: 16px;
+            font-weight: 800;
+            background: #1d976c;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+
+        .admin-clear-btn:hover {
+            background: #15805a;
+        }
+
+        /* Kiosk notice banner (shows after admin acknowledgement) */
+        .kiosk-notice-banner {
+            display: flex;
+            background: #fff8e1;
+            border: 2px solid #f1c40f;
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-bottom: 18px;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+            color: #7a5a00;
+            font-weight: 700;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .kiosk-notice-actions { display: none; }
+
+
+        /* Fullscreen modal for dispense timeout */
+        .timeout-modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 2600;
+            justify-content: center;
+            align-items: center;
+            padding: clamp(18px, 3vw, 32px);
+        }
+
+        .timeout-modal.show {
+            display: flex;
+        }
+
+        .timeout-card {
+            width: 100vw;
+            max-width: 1500px;
+            max-height: 95vh;
+            overflow: auto;
+            background: #ffffff;
+            border: 6px solid #c0392b;
+            border-radius: 16px;
+            padding: clamp(28px, 4vw, 52px);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+        }
+
+        .timeout-title {
+            font-size: clamp(34px, 4.2vw, 52px);
+            font-weight: 900;
+            color: #a5281b;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .timeout-text {
+            font-size: clamp(32px, 5vw, 52px);
+            line-height: 1.2;
+            font-weight: 900;
+            color: #7a1c12;
+            margin-bottom: 14px;
+        }
+
+        .timeout-meta {
+            font-size: clamp(18px, 2.3vw, 24px);
+            color: #333;
+            margin-bottom: 16px;
+            font-weight: 700;
+        }
+
+        .timeout-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 6px;
+        }
+
+        .timeout-primary-btn {
+            padding: 14px 26px;
+            font-size: 20px;
+            font-weight: 900;
+            background: linear-gradient(135deg, #e74c3c, #c0392b);
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            box-shadow: 0 8px 20px rgba(192,57,43,0.35);
+        }
+
+        .timeout-primary-btn:hover {
+            background: linear-gradient(135deg, #c0392b, #a93226);
+        }
+
+        .timeout-secondary-btn {
+            padding: 12px 20px;
+            font-size: 16px;
+            font-weight: 800;
+            background: #1d976c;
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+        }
+
+        .timeout-secondary-btn:hover {
+            background: #15805a;
+        }
+
+        .timeout-footnote {
+            margin-top: 12px;
+            font-size: 14px;
+            color: #5c5c5c;
+            font-weight: 600;
+        }
+
+        .alarm-enable-btn {
+            padding: 10px 18px;
+            font-size: 15px;
+            font-weight: 800;
+            background: #1d4ed8;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 12px;
+        }
+
+        .alarm-enable-btn:hover {
+            background: #1e40af;
+        }
+
+        .alarm-enabled-text {
+            display: none;
+            margin-bottom: 12px;
+            font-size: 14px;
+            font-weight: 700;
+            color: #14532d;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>RAON Dashboard</h1>
+        <div class="header-right">
+            <div class="refresh-time">Last update: <span id="lastUpdate">now</span></div>
+            <button type="button" id="enableTimeoutAlarmBtn" class="alarm-enable-btn" onclick="enableTimeoutAlarmSound()">Enable Alarm Sound</button>
+            <div id="timeoutAlarmEnabledText" class="alarm-enabled-text">Alarm sound enabled for this session.</div>
+        </div>
+    </div>
+
+    <!-- Kiosk notice banner (shown when kiosk is displaying admin notice) -->
+    <div class="container">
+        <div id="kioskNoticeBanner" class="kiosk-notice-banner">
+            <div><strong>Kiosk notice active:</strong> <span id="kioskNoticeMessage">Please wait. Admin is on the way to fix the machine.</span></div>
+        </div>
+    </div>
+
+    <!-- Fullscreen pop-out for dispense timeout -->
+    <div id="dispenseTimeoutModal" class="timeout-modal">
+        <div class="timeout-card">
+            <div class="timeout-title">Item Not Dispensed</div>
+            <div class="timeout-text" id="timeoutModalText">Slot N timed out. No item detected by IR sensor.</div>
+            <div class="timeout-meta" id="timeoutModalMeta">Elapsed: 0.0s</div>
+            <div class="timeout-actions">
+                <button type="button" class="timeout-primary-btn" onclick="acknowledgeDispenseTimeoutAlert()">Acknowledge & Notify Kiosk</button>
+                <button type="button" class="timeout-secondary-btn" onclick="clearKioskAdminNotice()">Clear notice on kiosk</button>
+            </div>
+            <div class="timeout-footnote">Kiosk will show an admin notice after you acknowledge. Clear the notice once the machine is fixed.</div>
+        </div>
+    </div>
+    
+    <div class="container">
+        <!-- Real-time Stats -->
+        <div class="stats-grid" id="statsGrid">
+            <div class="stat-card">
+                <div class="stat-icon">PHP</div>
+                <div class="stat-label">Inserted (Coins + Bills)</div>
+                <div class="stat-value" id="todaySales">&#8369;0.00</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">CHG</div>
+                <div class="stat-label">Change Given</div>
+                <div class="stat-value" id="changeGiven">&#8369;0.00</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">NET</div>
+                <div class="stat-label">Net Collected</div>
+                <div class="stat-value" id="netCollected">&#8369;0.00</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">TXN</div>
+                <div class="stat-label">Transactions</div>
+                <div class="stat-value" id="transactions">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">ITM</div>
+                <div class="stat-label">Items Sold</div>
+                <div class="stat-value" id="itemsSold">0</div>
+            </div>
+        </div>
+
+        <div id="dispenseTimeoutSection" class="dispense-timeout-panel" style="display: none;">
+            <div class="dispense-timeout-title">Dispense Timeout Alert</div>
+            <div class="dispense-timeout-text" id="dispenseTimeoutText"></div>
+            <div class="dispense-timeout-meta" id="dispenseTimeoutMeta"></div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+                <button type="button" class="dispense-timeout-ok-btn" onclick="acknowledgeDispenseTimeoutAlert()">Acknowledge & Notify Kiosk</button>
+                <button type="button" class="admin-clear-btn" onclick="clearKioskAdminNotice()">Clear Admin Notice on Kiosk</button>
+            </div>
+        </div>
+        
+        <!-- Low Stock Alerts Section -->
+        <div id="alertsSection" style="margin-bottom: 30px;">
+            <div class="logs-section" style="background: #fff5f5; border-left: 5px solid #e74c3c;">
+                <h3 style="color: #c0392b;">Stock Alerts</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                    <div style="background: white; padding: 10px; border-radius: 4px; border-left: 4px solid #c0392b;">
+                        <div style="font-size: 12px; color: #999; font-weight: bold;">Out of Stock</div>
+                        <div style="font-size: 24px; font-weight: bold; color: #c0392b;" id="criticalCount">0</div>
+                    </div>
+                    <div style="background: white; padding: 10px; border-radius: 4px; border-left: 4px solid #f39c12;">
+                        <div style="font-size: 12px; color: #999; font-weight: bold;">Low Stock</div>
+                        <div style="font-size: 24px; font-weight: bold; color: #f39c12;" id="warningCount">0</div>
+                    </div>
+                    <div style="background: white; padding: 10px; border-radius: 4px; border-left: 4px solid #667eea;">
+                        <div style="font-size: 12px; color: #999; font-weight: bold;">Last Updated</div>
+                        <div style="font-size: 12px; font-weight: bold; color: #667eea;" id="alertsLastUpdated">--:--</div>
+                    </div>
+                    <div style="background: white; padding: 10px; border-radius: 4px; border-left: 4px solid #16a085;">
+                        <div style="font-size: 12px; color: #999; font-weight: bold;">Active Kiosk Term</div>
+                        <div style="font-size: 14px; font-weight: bold; color: #16a085;" id="activeTermLabel">Term 1</div>
+                    </div>
+                </div>
+                <div id="alertsContainer" style="max-height: 400px; overflow-y: auto;">
+                    <div style="padding: 20px; text-align: center; color: #999;">Loading alerts...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Current Term Stock Bar Graph -->
+        <div class="chart-section" style="margin-bottom: 30px;">
+            <h3>Current Term Item Stocks (Bar Graph)</h3>
+            <div style="font-size: 12px; color: #666; margin-bottom: 10px;">
+                <span id="termStockMeta">Loading current term stock...</span>
+            </div>
+            <div class="chart-container" id="termStockChartContainer" style="height: 420px;">
+                <canvas id="termStockChart"></canvas>
+            </div>
+        </div>
+        
+        <!-- Machine Cards -->
+        <h2 style="margin: 30px 0 15px 0;">Machines</h2>
+        <div class="machines-grid" id="machinesGrid">
+            <div class="machine-card">Loading...</div>
+        </div>
+        <!-- Sales Logs -->
+        <div class="logs-section">
+            <h3>Sales Logs</h3>
+            <div id="today-logs" class="tab-content active">
+                <div style="margin-bottom: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                    <label for="logsDatePicker" style="font-size: 12px; color: #666;">Select Date:</label>
+                    <input type="date" id="logsDatePicker" style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <button type="button" onclick="loadLogsFromPicker()" style="padding: 6px 10px; border: none; border-radius: 4px; background: #667eea; color: white; cursor: pointer;">Load Date</button>
+                    <button type="button" onclick="loadTodayLogsNow()" style="padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; background: white; color: #333; cursor: pointer;">Today</button>
+                    <button type="button" onclick="exportSalesCsvFromPicker()" style="padding: 6px 10px; border: 1px solid #27ae60; border-radius: 4px; background: #27ae60; color: white; cursor: pointer;">Export Sales CSV</button>
+                    <span id="selectedDateLabel" style="font-size: 12px; color: #666;"></span>
+                </div>
+                <div id="universalAlertBanner" class="alert-banner">
+                    <span class="alert-dot"></span>
+                    <span class="alert-text">Alert</span>
+                </div>
+                <div id="logsSummaryLabel" style="font-size: 12px; color: #333; margin-bottom: 8px;"></div>
+                <div class="logs-container" id="logsContainer">
+                    <div class="log-line">Loading logs...</div>
+                </div>
+            </div>
+        </div>
+        <!-- Temperature & Humidity Text Logs -->
+        <div class="logs-section">
+            <h3>Temperature & Humidity Logs (Every 15 Minutes)</h3>
+            <div style="margin-bottom: 10px; font-size: 12px; color: #666;">
+                Uses the same selected date as Sensor Readings below.
+                <span id="sensorTextDateLabel" style="margin-left: 8px;"></span>
+            </div>
+            <div class="logs-container" id="sensorTextLogsContainer">
+                <div class="log-line">Loading temperature/humidity logs...</div>
+            </div>
+        </div>
+
+        <!-- Sensor Readings Chart -->
+        <div class="chart-section">
+            <h3>Sensor Readings - Temperature & Humidity</h3>
+            <div style="margin-bottom: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                <label for="sensorDatePicker" style="font-size: 12px; color: #666;">Select Date:</label>
+                <input type="date" id="sensorDatePicker" style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <button type="button" onclick="loadSensorDataFromPicker()" style="padding: 6px 10px; border: none; border-radius: 4px; background: #667eea; color: white; cursor: pointer;">Load Date</button>
+                <button type="button" onclick="loadTodaySensorData()" style="padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; background: white; color: #333; cursor: pointer;">Today</button>
+                <button type="button" onclick="exportSensorCsvFromPicker()" style="padding: 6px 10px; border: 1px solid #27ae60; border-radius: 4px; background: #27ae60; color: white; cursor: pointer;">Export Sensor CSV</button>
+                <span id="sensorDateLabel" style="font-size: 12px; color: #666;"></span>
+            </div>
+
+                        <div id="today-chart" class="tab-content active">
+                <div class="chart-container">
+                    <canvas id="sensorChart"></canvas>
+                </div>
+                <div class="chart-container" style="margin-top: 20px;">
+                    <canvas id="irSensorChart"></canvas>
+                </div>
+                <div class="sensor-stats-grid" id="todayStatsGrid">
+                    <div class="sensor-stat-box">
+                        <div class="sensor-stat-label">Avg Temp 1</div>
+                        <div class="sensor-stat-value" id="avgTemp1">--&deg;C</div>
+                    </div>
+                    <div class="sensor-stat-box">
+                        <div class="sensor-stat-label">Avg Temp 2</div>
+                        <div class="sensor-stat-value" id="avgTemp2">--&deg;C</div>
+                    </div>
+                    <div class="sensor-stat-box">
+                        <div class="sensor-stat-label">Avg Humidity 1</div>
+                        <div class="sensor-stat-value" id="avgHumidity1">--%</div>
+                    </div>
+                    <div class="sensor-stat-box">
+                        <div class="sensor-stat-label">Avg Humidity 2</div>
+                        <div class="sensor-stat-value" id="avgHumidity2">--%</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+        <script>
+        let sensorChartInstance = null;
+        let irChartInstance = null;
+        let termStockChartInstance = null;
+        let autoFollowLogsDate = true;
+        let autoFollowSensorDate = true;
+        let lastAutoDate = null;
+        let stockAlertAudioContext = null;
+        let timeoutAlertAudioContext = null;
+        let timeoutAlertIntervalId = null;
+        let timeoutAlertSoundActive = false;
+        let timeoutAlarmAudioEnabled = false;
+        let kioskNoticeActive = false;
+        let kioskNoticeMessage = '';
+        const stockAlertState = {
+            initialized: false,
+            critical: 0,
+            warning: 0,
+            lastPlayedAtMs: 0
+        };
+        const termStockValueLabelsPlugin = {
+            id: 'termStockValueLabels',
+            afterDatasetsDraw(chart) {
+                const datasetIndex = 0; // Current Stock bars
+                const meta = chart.getDatasetMeta(datasetIndex);
+                const dataset = chart.data.datasets[datasetIndex];
+                if (!meta || !dataset || !meta.data) return;
+
+                const ctx = chart.ctx;
+                ctx.save();
+                ctx.fillStyle = '#2c3e50';
+                ctx.font = 'bold 11px Helvetica, Arial, sans-serif';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+
+                meta.data.forEach((bar, index) => {
+                    const rawValue = dataset.data[index];
+                    const value = Number(rawValue || 0);
+                    const x = bar.x + 6;
+                    const y = bar.y;
+                    ctx.fillText(String(value), x, y);
+                });
+
+                ctx.restore();
+            }
+        };
+
+        function getStockAlertAudioContext() {
+            if (stockAlertAudioContext) return stockAlertAudioContext;
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) return null;
+            stockAlertAudioContext = new AudioCtx();
+            return stockAlertAudioContext;
+        }
+
+        function playStockAlertSound(severity) {
+            try {
+                const ctx = getStockAlertAudioContext();
+                if (!ctx) return;
+                if (ctx.state === 'suspended') {
+                    ctx.resume().catch(() => {});
+                }
+
+                const pattern = severity === 'critical'
+                    ? [{ f: 980, d: 0.12 }, { f: 740, d: 0.10 }, { f: 980, d: 0.14 }]
+                    : [{ f: 640, d: 0.10 }, { f: 640, d: 0.10 }];
+
+                let start = ctx.currentTime + 0.02;
+                pattern.forEach(step => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'square';
+                    osc.frequency.value = step.f;
+                    gain.gain.setValueAtTime(0.0001, start);
+                    gain.gain.exponentialRampToValueAtTime(0.12, start + 0.01);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, start + step.d);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(start);
+                    osc.stop(start + step.d + 0.02);
+                    start += step.d + 0.05;
+                });
+            } catch (err) {
+                console.warn('Stock alert sound failed:', err);
+            }
+        }
+
+        function maybePlayStockAlertSound(criticalCount, warningCount) {
+            const critical = Number(criticalCount || 0);
+            const warning = Number(warningCount || 0);
+            const hasAlerts = critical > 0 || warning > 0;
+            const prevCritical = stockAlertState.critical;
+            const prevWarning = stockAlertState.warning;
+
+            const raised =
+                critical > prevCritical ||
+                warning > prevWarning ||
+                (critical > 0 && prevCritical === 0) ||
+                (warning > 0 && prevWarning === 0);
+
+            const shouldPlay = hasAlerts && (!stockAlertState.initialized || raised);
+            const nowMs = Date.now();
+            if (shouldPlay && (nowMs - stockAlertState.lastPlayedAtMs) > 3000) {
+                playStockAlertSound(critical > 0 ? 'critical' : 'warning');
+                stockAlertState.lastPlayedAtMs = nowMs;
+            }
+
+            stockAlertState.initialized = true;
+            stockAlertState.critical = critical;
+            stockAlertState.warning = warning;
+        }
+
+        function getTimeoutAlertAudioContext() {
+            if (timeoutAlertAudioContext) return timeoutAlertAudioContext;
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) return null;
+            timeoutAlertAudioContext = new AudioCtx();
+            return timeoutAlertAudioContext;
+        }
+
+        function playTimeoutAlertPulse() {
+            try {
+                const ctx = getTimeoutAlertAudioContext();
+                if (!ctx) return;
+                if (ctx.state === 'suspended') {
+                    ctx.resume().catch(() => {});
+                }
+                const pattern = [{ f: 1200, d: 0.16 }, { f: 900, d: 0.16 }];
+                let start = ctx.currentTime + 0.01;
+                pattern.forEach(step => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sawtooth';
+                    osc.frequency.value = step.f;
+                    gain.gain.setValueAtTime(0.0001, start);
+                    gain.gain.exponentialRampToValueAtTime(0.18, start + 0.01);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, start + step.d);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start(start);
+                    osc.stop(start + step.d + 0.02);
+                    start += step.d + 0.06;
+                });
+            } catch (err) {
+                console.warn('Timeout alert sound failed:', err);
+            }
+        }
+
+        function startTimeoutAlertSound() {
+            if (!timeoutAlarmAudioEnabled) return;
+            if (timeoutAlertSoundActive) return;
+            timeoutAlertSoundActive = true;
+            playTimeoutAlertPulse();
+            timeoutAlertIntervalId = window.setInterval(() => {
+                playTimeoutAlertPulse();
+            }, 1500);
+        }
+
+        function stopTimeoutAlertSound() {
+            timeoutAlertSoundActive = false;
+            if (timeoutAlertIntervalId) {
+                window.clearInterval(timeoutAlertIntervalId);
+                timeoutAlertIntervalId = null;
+            }
+        }
+
+        function updateTimeoutAlarmUi() {
+            const btn = document.getElementById('enableTimeoutAlarmBtn');
+            const enabledText = document.getElementById('timeoutAlarmEnabledText');
+            if (btn) btn.style.display = timeoutAlarmAudioEnabled ? 'none' : 'inline-block';
+            if (enabledText) enabledText.style.display = timeoutAlarmAudioEnabled ? 'inline-block' : 'none';
+        }
+
+        async function enableTimeoutAlarmSound() {
+            timeoutAlarmAudioEnabled = true;
+            try {
+                localStorage.setItem('timeoutAlarmEnabled', '1');
+            } catch (_) {}
+            try {
+                const ctx = getTimeoutAlertAudioContext();
+                if (ctx && ctx.state === 'suspended') {
+                    await ctx.resume();
+                }
+            } catch (_) {}
+            updateTimeoutAlarmUi();
+            // If timeout is already active when enabling, start immediately.
+            loadDispenseTimeoutAlert();
+        }
+
+        function restoreTimeoutAlarmSetting() {
+            try {
+                const saved = localStorage.getItem('timeoutAlarmEnabled');
+                timeoutAlarmAudioEnabled = saved === '1';
+            } catch (_) {
+                timeoutAlarmAudioEnabled = false;
+            }
+            updateTimeoutAlarmUi();
+        }
+        async function loadKioskNoticeState() {
+            try {
+                const res = await fetch('/api/kiosk-admin-notice?t=' + Date.now(), { cache: 'no-store' });
+                const data = await res.json();
+                kioskNoticeActive = Boolean(data.active);
+                kioskNoticeMessage = String(data.message || '');
+
+                const banner = document.getElementById('kioskNoticeBanner');
+                const msgEl = document.getElementById('kioskNoticeMessage');
+                if (banner) banner.style.display = 'flex';
+                if (msgEl) msgEl.textContent = kioskNoticeActive
+                    ? (kioskNoticeMessage || 'Please wait. Admin is on the way to fix the machine.')
+                    : 'No kiosk notice active';
+            } catch (error) {
+                console.error('Error loading kiosk notice state:', error);
+            }
+        }
+
+        function getTodayIsoDate() {
+            const now = new Date();
+            const y = now.getFullYear();
+            const m = String(now.getMonth() + 1).padStart(2, '0');
+            const d = String(now.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        }
+
+        function syncDatePickersWithToday(force = false) {
+            const today = getTodayIsoDate();
+            const previousAutoDate = lastAutoDate;
+            const dayRolledOver = Boolean(previousAutoDate && previousAutoDate !== today);
+
+            const logsPicker = document.getElementById('logsDatePicker');
+            if (logsPicker) {
+                const shouldSetLogs =
+                    force ||
+                    !logsPicker.value ||
+                    autoFollowLogsDate ||
+                    (dayRolledOver && logsPicker.value === previousAutoDate);
+                if (shouldSetLogs) logsPicker.value = today;
+            }
+
+            const sensorPicker = document.getElementById('sensorDatePicker');
+            if (sensorPicker) {
+                const shouldSetSensor =
+                    force ||
+                    !sensorPicker.value ||
+                    autoFollowSensorDate ||
+                    (dayRolledOver && sensorPicker.value === previousAutoDate);
+                if (shouldSetSensor) sensorPicker.value = today;
+            }
+
+            lastAutoDate = today;
+            return today;
+        }
+
+        function escapeHtml(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function renderLogs(containerId, logs, emptyText) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            if (logs && logs.length > 0) {
+                container.innerHTML = logs
+                    .slice(-20)
+                    .reverse()
+                    .map(log => `<div class="log-line">${escapeHtml(log)}</div>`)
+                    .join('');
+            } else {
+                container.innerHTML = `<div class="log-line">${escapeHtml(emptyText)}</div>`;
+            }
+        }
+
+        function triggerCsvDownload(url) {
+            const link = document.createElement('a');
+            link.href = url;
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        async function loadSalesLogsByDate(dateStr, containerId, labelId) {
+            if (!dateStr) return;
+            try {
+                const res = await fetch('/api/sales/logs?date=' + encodeURIComponent(dateStr));
+                const data = await res.json();
+                renderLogs(containerId, data.logs, `No sales recorded on ${dateStr}`);
+                const label = document.getElementById(labelId);
+                if (label) label.textContent = 'Date: ' + dateStr;
+                const summaryLabel = document.getElementById('logsSummaryLabel');
+                if (summaryLabel) {
+                    const inserted = Number(data?.summary?.total_inserted || 0);
+                    const change = Number(data?.summary?.total_change || 0);
+                    const net = Number(data?.summary?.total_net_collected || (inserted - change));
+                    const cs = data?.summary?.change_stock || {};
+                    const changeAlert = !!data?.summary?.change_out;
+                    const dispenseAlert = !!data?.summary?.dispense_failed;
+                    summaryLabel.textContent = `Inserted: \u20B1${inserted.toFixed(2)} | Change: \u20B1${change.toFixed(2)} | Net: \u20B1${net.toFixed(2)}` +
+                        (changeAlert ? ' | CHANGE OUT: Exact amount only' : '');
+                    const alertBanner = document.getElementById('universalAlertBanner');
+                    if (alertBanner) {
+                        const msgs = [];
+                        if (changeAlert) msgs.push('Change hoppers empty — exact amount only');
+                        if (dispenseAlert) msgs.push('Some items failed to dispense — check hopper/slots');
+                        if (msgs.length) {
+                            alertBanner.style.display = 'flex';
+                            alertBanner.querySelector('.alert-text').textContent = msgs.join(' • ');
+                        } else {
+                            alertBanner.style.display = 'none';
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading sales logs:', error);
+                const container = document.getElementById(containerId);
+                if (container) container.innerHTML = '<div class="log-line">Error loading sales logs</div>';
+                const summaryLabel = document.getElementById('logsSummaryLabel');
+                if (summaryLabel) summaryLabel.textContent = '';
+                const alertBanner = document.getElementById('universalAlertBanner');
+                if (alertBanner) alertBanner.style.display = 'none';
+            }
+        }
+
+        async function loadLogsFromPicker() {
+            const picker = document.getElementById('logsDatePicker');
+            const selected = picker && picker.value ? picker.value : getTodayIsoDate();
+            autoFollowLogsDate = (selected === getTodayIsoDate());
+            await loadSalesLogsByDate(selected, 'logsContainer', 'selectedDateLabel');
+        }
+
+        async function loadTodayLogsNow() {
+            const today = getTodayIsoDate();
+            const picker = document.getElementById('logsDatePicker');
+            if (picker) picker.value = today;
+            autoFollowLogsDate = true;
+            await loadSalesLogsByDate(today, 'logsContainer', 'selectedDateLabel');
+        }
+
+        function exportSalesCsvFromPicker() {
+            const picker = document.getElementById('logsDatePicker');
+            const selected = picker && picker.value ? picker.value : getTodayIsoDate();
+            autoFollowLogsDate = (selected === getTodayIsoDate());
+            triggerCsvDownload('/api/export/sales.csv?date=' + encodeURIComponent(selected));
+        }
+
+        function toTimeLabel(timestamp, fallbackIndex) {
+            if (!timestamp) return String(fallbackIndex || '');
+            const parsed = new Date(timestamp);
+            if (!Number.isNaN(parsed.getTime())) {
+                const hh = String(parsed.getHours()).padStart(2, '0');
+                const mm = String(parsed.getMinutes()).padStart(2, '0');
+                return `${hh}:${mm}`;
+            }
+            const txt = String(timestamp);
+            return txt.length >= 16 ? txt.substring(11, 16) : txt;
+        }
+
+        function parseIRValue(rawValue) {
+            if (rawValue === null || rawValue === undefined) return null;
+            const value = String(rawValue).trim().toLowerCase();
+            if (value === '') return null;
+            if (value === '1' || value === 'true' || value === 'detected' || value.includes('detect')) return 1;
+            if (value === '0' || value === 'false' || value === 'not detected' || value.includes('clear')) return 0;
+            const numericValue = Number(value);
+            if (!Number.isNaN(numericValue)) return numericValue > 0 ? 1 : 0;
+            return null;
+        }
+
+        function parseRelayValue(rawValue) {
+            if (rawValue === null || rawValue === undefined) return null;
+            const value = String(rawValue).trim().toLowerCase();
+            if (value === '') return null;
+            if (value === 'on' || value === '1' || value === 'true' || value === 'active') return 'ON';
+            if (value === 'off' || value === '0' || value === 'false' || value === 'inactive') return 'OFF';
+            return null;
+        }
+
+        function roundOne(value) {
+            if (value === null || value === undefined || Number.isNaN(Number(value))) return null;
+            return Math.round(Number(value) * 10) / 10;
+        }
+
+        function buildFifteenMinuteTextLogs(readings) {
+            const buckets = new Map();
+            readings.forEach((reading, index) => {
+                const rawTs = reading && reading.timestamp ? reading.timestamp : null;
+                const parsed = rawTs ? new Date(rawTs) : null;
+                let key;
+                let label;
+
+                if (parsed && !Number.isNaN(parsed.getTime())) {
+                    const y = parsed.getFullYear();
+                    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+                    const d = String(parsed.getDate()).padStart(2, '0');
+                    const hh = String(parsed.getHours()).padStart(2, '0');
+                    const minute = parsed.getMinutes();
+                    const bucketMinute = String(Math.floor(minute / 15) * 15).padStart(2, '0');
+                    key = `${y}-${m}-${d} ${hh}:${bucketMinute}`;
+                    label = `${hh}:${bucketMinute}`;
+                } else {
+                    key = `unknown-${index}`;
+                    label = toTimeLabel(rawTs, index + 1);
+                }
+
+                if (!buckets.has(key)) {
+                    buckets.set(key, {
+                        label,
+                        temp1Total: 0,
+                        temp1Count: 0,
+                        temp2Total: 0,
+                        temp2Count: 0,
+                        humidity1Total: 0,
+                        humidity1Count: 0,
+                        humidity2Total: 0,
+                        humidity2Count: 0,
+                        relayLast: null
+                    });
+                }
+
+                const bucket = buckets.get(key);
+                const t1 = Number(reading.temp1);
+                const t2 = Number(reading.temp2);
+                const h1 = Number(reading.humidity1);
+                const h2 = Number(reading.humidity2);
+                const relay = parseRelayValue(reading.relay);
+                if (!Number.isNaN(t1)) { bucket.temp1Total += t1; bucket.temp1Count += 1; }
+                if (!Number.isNaN(t2)) { bucket.temp2Total += t2; bucket.temp2Count += 1; }
+                if (!Number.isNaN(h1)) { bucket.humidity1Total += h1; bucket.humidity1Count += 1; }
+                if (!Number.isNaN(h2)) { bucket.humidity2Total += h2; bucket.humidity2Count += 1; }
+                if (relay !== null) bucket.relayLast = relay;
+            });
+
+            return Array.from(buckets.entries())
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([, bucket]) => {
+                    const t1 = bucket.temp1Count ? roundOne(bucket.temp1Total / bucket.temp1Count) : null;
+                    const t2 = bucket.temp2Count ? roundOne(bucket.temp2Total / bucket.temp2Count) : null;
+                    const h1 = bucket.humidity1Count ? roundOne(bucket.humidity1Total / bucket.humidity1Count) : null;
+                    const h2 = bucket.humidity2Count ? roundOne(bucket.humidity2Total / bucket.humidity2Count) : null;
+                    const t1Txt = t1 === null ? '--' : `${t1.toFixed(1)} C`;
+                    const t2Txt = t2 === null ? '--' : `${t2.toFixed(1)} C`;
+                    const h1Txt = h1 === null ? '--' : `${h1.toFixed(1)} %`;
+                    const h2Txt = h2 === null ? '--' : `${h2.toFixed(1)} %`;
+                    const tecTxt = bucket.relayLast === null ? '--' : bucket.relayLast;
+                    return `${bucket.label} | T1 ${t1Txt}, H1 ${h1Txt} | T2 ${t2Txt}, H2 ${h2Txt} | TEC ${tecTxt}`;
+                });
+        }
+
+        function applySensorStats(stats) {
+            const temp1 = Number(stats && stats.avg_temp1);
+            const temp2 = Number(stats && stats.avg_temp2);
+            const humidity1 = Number(stats && stats.avg_humidity1);
+            const humidity2 = Number(stats && stats.avg_humidity2);
+            document.getElementById('avgTemp1').textContent = Number.isNaN(temp1) ? '--\u00B0C' : temp1.toFixed(1) + '\u00B0C';
+            document.getElementById('avgTemp2').textContent = Number.isNaN(temp2) ? '--\u00B0C' : temp2.toFixed(1) + '\u00B0C';
+            document.getElementById('avgHumidity1').textContent = Number.isNaN(humidity1) ? '--%' : humidity1.toFixed(1) + '%';
+            document.getElementById('avgHumidity2').textContent = Number.isNaN(humidity2) ? '--%' : humidity2.toFixed(1) + '%';
+        }
+
+        function drawSensorChart(canvasId, timestamps, temp1Data, temp2Data, humidity1Data, humidity2Data, label) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            if (sensorChartInstance) sensorChartInstance.destroy();
+
+            sensorChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: timestamps,
+                    datasets: [
+                        { label: 'Temperature Sensor 1 (\u00B0C)', data: temp1Data, borderColor: '#e74c3c', backgroundColor: 'rgba(231, 76, 60, 0.1)', borderWidth: 2, fill: true, tension: 0.4, pointRadius: 3 },
+                        { label: 'Temperature Sensor 2 (\u00B0C)', data: temp2Data, borderColor: '#f39c12', backgroundColor: 'rgba(243, 156, 18, 0.1)', borderWidth: 2, fill: true, tension: 0.4, pointRadius: 3 },
+                        { label: 'Humidity Sensor 1 (%)', data: humidity1Data, borderColor: '#3498db', backgroundColor: 'rgba(52, 152, 219, 0.1)', borderWidth: 2, fill: true, tension: 0.4, pointRadius: 3 },
+                        { label: 'Humidity Sensor 2 (%)', data: humidity2Data, borderColor: '#1abc9c', backgroundColor: 'rgba(26, 188, 156, 0.1)', borderWidth: 2, fill: true, tension: 0.4, pointRadius: 3 }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { title: { display: true, text: 'Sensor Readings - ' + label } },
+                    scales: { y: { beginAtZero: true }, x: { title: { display: true, text: 'Time (HH:MM)' } } }
+                }
+            });
+        }
+
+        function drawIRChart(canvasId, timestamps, ir1Data, ir2Data, label) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            if (irChartInstance) irChartInstance.destroy();
+
+            irChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: timestamps,
+                    datasets: [
+                        { label: 'IR Sensor 1', data: ir1Data, borderColor: '#8e44ad', backgroundColor: 'rgba(142, 68, 173, 0.1)', borderWidth: 2, fill: true, tension: 0.1, pointRadius: 2 },
+                        { label: 'IR Sensor 2', data: ir2Data, borderColor: '#2ecc71', backgroundColor: 'rgba(46, 204, 113, 0.1)', borderWidth: 2, fill: true, tension: 0.1, pointRadius: 2 }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { title: { display: true, text: 'IR Sensor Readings - ' + label } },
+                    scales: {
+                        y: {
+                            min: 0,
+                            max: 1,
+                            ticks: { stepSize: 1, callback: v => (v === 1 ? 'Detected' : 'Clear') },
+                            title: { display: true, text: 'Detection' }
+                        },
+                        x: { title: { display: true, text: 'Time (HH:MM)' } }
+                    }
+                }
+            });
+        }
+
+        async function loadSensorGraphByDate(dateStr) {
+            if (!dateStr) return;
+            try {
+                const res = await fetch('/api/sensor-readings?date=' + encodeURIComponent(dateStr));
+                const data = await res.json();
+                const readings = data.readings || [];
+                document.getElementById('sensorDateLabel').textContent = 'Date: ' + dateStr;
+                document.getElementById('sensorTextDateLabel').textContent = 'Date: ' + dateStr;
+
+                if (readings.length === 0) {
+                    applySensorStats({});
+                    drawSensorChart('sensorChart', [], [], [], [], [], dateStr + ' (No Data)');
+                    drawIRChart('irSensorChart', [], [], [], dateStr + ' (No Data)');
+                    return;
+                }
+
+                const timestamps = readings.map((r, idx) => toTimeLabel(r.timestamp, idx + 1));
+                const temp1Data = readings.map(r => r.temp1 || null);
+                const temp2Data = readings.map(r => r.temp2 || null);
+                const humidity1Data = readings.map(r => r.humidity1 || null);
+                const humidity2Data = readings.map(r => r.humidity2 || null);
+                const ir1Data = readings.map(r => parseIRValue(r.ir1));
+                const ir2Data = readings.map(r => parseIRValue(r.ir2));
+
+                applySensorStats(data.stats || {});
+                drawSensorChart('sensorChart', timestamps, temp1Data, temp2Data, humidity1Data, humidity2Data, dateStr);
+                drawIRChart('irSensorChart', timestamps, ir1Data, ir2Data, dateStr);
+            } catch (error) {
+                console.error('Error loading sensor graph:', error);
+            }
+        }
+
+        async function loadSensorGraphFromPicker() {
+            const picker = document.getElementById('sensorDatePicker');
+            const selected = picker && picker.value ? picker.value : getTodayIsoDate();
+            await loadSensorGraphByDate(selected);
+        }
+
+        async function loadTodaySensorGraph() {
+            const today = getTodayIsoDate();
+            const picker = document.getElementById('sensorDatePicker');
+            if (picker) picker.value = today;
+            await loadSensorGraphByDate(today);
+        }
+
+        async function loadSensorDataForDate(dateStr) {
+            if (!dateStr) return;
+            await loadSensorGraphByDate(dateStr);
+            await loadSensorTextLogsByDate(dateStr);
+        }
+
+        async function loadSensorDataFromPicker() {
+            const picker = document.getElementById('sensorDatePicker');
+            const selected = picker && picker.value ? picker.value : getTodayIsoDate();
+            autoFollowSensorDate = (selected === getTodayIsoDate());
+            await loadSensorDataForDate(selected);
+        }
+
+        async function loadTodaySensorData() {
+            const today = getTodayIsoDate();
+            const picker = document.getElementById('sensorDatePicker');
+            if (picker) picker.value = today;
+            autoFollowSensorDate = true;
+            await loadSensorDataForDate(today);
+        }
+
+        function exportSensorCsvFromPicker() {
+            const picker = document.getElementById('sensorDatePicker');
+            const selected = picker && picker.value ? picker.value : getTodayIsoDate();
+            autoFollowSensorDate = (selected === getTodayIsoDate());
+            triggerCsvDownload('/api/export/sensor.csv?date=' + encodeURIComponent(selected));
+        }
+
+        async function loadSensorTextLogsByDate(dateStr) {
+            if (!dateStr) return;
+            try {
+                const res = await fetch('/api/sensor-readings?date=' + encodeURIComponent(dateStr));
+                const data = await res.json();
+                const lines = buildFifteenMinuteTextLogs(data.readings || []);
+                document.getElementById('sensorTextDateLabel').textContent = 'Date: ' + dateStr;
+                renderLogs('sensorTextLogsContainer', lines, `No temperature/humidity logs on ${dateStr}`);
+            } catch (error) {
+                console.error('Error loading sensor text logs:', error);
+                const c = document.getElementById('sensorTextLogsContainer');
+                if (c) c.innerHTML = '<div class="log-line">Error loading temperature/humidity logs</div>';
+            }
+        }
+
+        async function loadSensorTextLogsFromPicker() {
+            await loadSensorDataFromPicker();
+        }
+
+        async function loadTodaySensorTextLogs() {
+            await loadTodaySensorData();
+        }
+
+        async function refreshSensorPanelByMode() {
+            const today = syncDatePickersWithToday();
+            const picker = document.getElementById('sensorDatePicker');
+            const selectedDate = autoFollowSensorDate
+                ? today
+                : (picker && picker.value ? picker.value : today);
+            if (autoFollowSensorDate && picker) picker.value = today;
+            await loadSensorDataForDate(selectedDate);
+        }
+
+        async function loadDispenseTimeoutAlert() {
+            try {
+                const res = await fetch('/api/dispense-timeout-alert');
+                const data = await res.json();
+                const section = document.getElementById('dispenseTimeoutSection');
+                const text = document.getElementById('dispenseTimeoutText');
+                const meta = document.getElementById('dispenseTimeoutMeta');
+                const modal = document.getElementById('dispenseTimeoutModal');
+                const modalText = document.getElementById('timeoutModalText');
+                const modalMeta = document.getElementById('timeoutModalMeta');
+                if (!section || !text || !meta || !modal || !modalText || !modalMeta) return;
+
+                if (!data.active || !data.alert) {
+                    section.style.display = 'none';
+                    text.textContent = '';
+                    meta.textContent = '';
+                    modal.classList.remove('show');
+                    modalText.textContent = '';
+                    modalMeta.textContent = '';
+                    stopTimeoutAlertSound();
+                    await loadKioskNoticeState();
+                    return;
+                }
+
+                const alert = data.alert || {};
+                const slot = String(alert.slot_id || 'N/A');
+                const elapsed = Number(alert.elapsed_time || 0).toFixed(1);
+                const createdAt = String(alert.created_at || '');
+                section.style.display = 'block';
+                text.textContent = `Slot ${slot} timed out. No item detected by IR sensor.`;
+                meta.textContent = `Timeout: ${elapsed}s${createdAt ? ` | Reported: ${createdAt}` : ''}`;
+
+                modalText.textContent = `Slot ${slot} timed out. No item detected by IR sensor.`;
+                modalMeta.textContent = `Elapsed: ${elapsed}s${createdAt ? ` • Reported: ${createdAt}` : ''}`;
+                modal.classList.add('show');
+
+                startTimeoutAlertSound();
+                await loadKioskNoticeState();
+            } catch (error) {
+                console.error('Error loading dispense timeout alert:', error);
+            }
+        }
+
+        async function acknowledgeDispenseTimeoutAlert() {
+            try {
+                const res = await fetch('/api/dispense-timeout-alert/acknowledge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert(data.message || 'No active timeout alert to acknowledge.');
+                } else {
+                    stopTimeoutAlertSound();
+                    const modal = document.getElementById('dispenseTimeoutModal');
+                    if (modal) modal.classList.remove('show');
+                }
+                await loadDispenseTimeoutAlert();
+                await loadKioskNoticeState();
+            } catch (error) {
+                console.error('Error acknowledging dispense timeout alert:', error);
+            }
+        }
+
+       async function clearKioskAdminNotice() {
+           try {
+               await fetch('/api/kiosk-admin-notice/clear', {
+                   method: 'POST',
+                   headers: { 'Content-Type': 'application/json' },
+                   body: JSON.stringify({})
+               });
+               await loadKioskNoticeState();
+           } catch (error) {
+               console.error('Error clearing kiosk admin notice:', error);
+           }
+       }
+
+        async function loadStockAlerts() {
+            try {
+                const res = await fetch('/api/stock-alerts');
+                const data = await res.json();
+                const alerts = data.alerts || [];
+                const totalCritical = Number(data.total_critical || 0);
+                const totalWarning = Number(data.total_warning || 0);
+                const activeTermLabel = data.active_term_label || 'Term 1';
+                document.getElementById('criticalCount').textContent = totalCritical;
+                document.getElementById('warningCount').textContent = totalWarning;
+                document.getElementById('activeTermLabel').textContent = activeTermLabel;
+                document.getElementById('alertsLastUpdated').textContent = new Date().toLocaleTimeString();
+                maybePlayStockAlertSound(totalCritical, totalWarning);
+
+                const container = document.getElementById('alertsContainer');
+                if (alerts.length === 0) {
+                    container.innerHTML = '<div style="padding: 20px; text-align: center; color: #27ae60; font-weight: bold;">All items in stock!</div>';
+                    return;
+                }
+
+                const alertsByMachine = {};
+                alerts.forEach(alert => {
+                    if (!alertsByMachine[alert.machine_id]) {
+                        alertsByMachine[alert.machine_id] = { machine_name: alert.machine_name, critical: [], warning: [] };
+                    }
+                    if (alert.alert_type === 'out_of_stock') alertsByMachine[alert.machine_id].critical.push(alert);
+                    else alertsByMachine[alert.machine_id].warning.push(alert);
+                });
+
+                let html = '';
+                Object.values(alertsByMachine).forEach(items => {
+                    html += `<div style="margin-bottom: 15px;"><div style="font-weight: bold; color: #333; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #ddd;">${escapeHtml(items.machine_name)}</div>`;
+                    items.critical.forEach(alert => {
+                        html += `<div class="alert-item critical" style="margin-bottom: 8px;"><div class="alert-info"><div class="alert-title">OUT OF STOCK</div><div class="alert-message"><strong>${escapeHtml(alert.item_name)}</strong> (${escapeHtml(alert.category || 'Uncategorized')})<br/>Slots: ${escapeHtml(alert.slots || 'N/A')} | Price: \u20B1${Number(alert.price || 0).toFixed(2)}</div></div></div>`;
+                    });
+                    items.warning.forEach(alert => {
+                        html += `<div class="alert-item warning" style="margin-bottom: 8px;"><div class="alert-info"><div class="alert-title">LOW STOCK</div><div class="alert-message"><strong>${escapeHtml(alert.item_name)}</strong>: ${alert.current_quantity}/${alert.threshold} units<br/>Category: ${escapeHtml(alert.category || 'Uncategorized')} | Slots: ${escapeHtml(alert.slots || 'N/A')}</div></div></div>`;
+                    });
+                    html += '</div>';
+                });
+                container.innerHTML = html;
+            } catch (error) {
+                console.error('Error loading stock alerts:', error);
+                document.getElementById('alertsContainer').innerHTML = '<div style="padding: 10px; color: #e74c3c;">Error loading alerts</div>';
+            }
+        }
+
+        function drawTermStockChart(items, activeTermLabel) {
+            const canvas = document.getElementById('termStockChart');
+            if (!canvas) return;
+
+            const container = document.getElementById('termStockChartContainer');
+            const labels = (items || []).map(i => String(i.item_name || 'Unknown Item'));
+            const quantities = (items || []).map(i => Number(i.quantity || 0));
+            const thresholds = (items || []).map(i => Number(i.threshold || 0));
+            const colors = (items || []).map(i => {
+                const qty = Number(i.quantity || 0);
+                const th = Number(i.threshold || 0);
+                if (qty <= 0) return '#c0392b';
+                if (th > 0 && qty <= th) return '#f39c12';
+                return '#27ae60';
+            });
+
+            if (container) {
+                container.style.height = `${Math.max(420, labels.length * 28)}px`;
+            }
+
+            if (termStockChartInstance) termStockChartInstance.destroy();
+
+            termStockChartInstance = new Chart(canvas.getContext('2d'), {
+                plugins: [termStockValueLabelsPlugin],
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'Current Stock',
+                            data: quantities,
+                            backgroundColor: colors,
+                            borderColor: colors,
+                            borderWidth: 1,
+                        },
+                        {
+                            label: 'Low Stock Threshold',
+                            data: thresholds,
+                            type: 'line',
+                            borderColor: '#34495e',
+                            backgroundColor: '#34495e',
+                            borderWidth: 2,
+                            pointRadius: 2,
+                            tension: 0,
+                        }
+                    ]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    layout: {
+                        padding: { right: 40 }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: `${activeTermLabel} - Stock vs Items`
+                        },
+                        legend: {
+                            display: true,
+                            position: 'bottom'
+                        }
+                    },
+                    scales: {
+                        x: {
+                            beginAtZero: true,
+                            ticks: { precision: 0 },
+                            title: { display: true, text: 'Stock Quantity' }
+                        },
+                        y: {
+                            ticks: {
+                                autoSkip: false
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        async function loadTermStockGraph() {
+            const meta = document.getElementById('termStockMeta');
+            try {
+                const res = await fetch('/api/term-stock');
+                const data = await res.json();
+                const items = (data.items || []).slice().sort((a, b) =>
+                    String(a.item_name || '').localeCompare(String(b.item_name || ''), undefined, { sensitivity: 'base' })
+                );
+                const termLabel = data.active_term_label || 'Term 1';
+                const totalUnits = Number(data.total_units || 0);
+                const itemCount = Number(data.item_count || 0);
+
+                if (meta) {
+                    meta.textContent = `${termLabel} | Items: ${itemCount} | Total Units: ${totalUnits}`;
+                }
+
+                if (items.length === 0) {
+                    if (termStockChartInstance) {
+                        termStockChartInstance.destroy();
+                        termStockChartInstance = null;
+                    }
+                    const container = document.getElementById('termStockChartContainer');
+                    if (container) {
+                        container.innerHTML = '<div style="padding: 24px; text-align: center; color: #999;">No item stock data for current term.</div>';
+                    }
+                    return;
+                }
+
+                const container = document.getElementById('termStockChartContainer');
+                if (container && !document.getElementById('termStockChart')) {
+                    container.innerHTML = '<canvas id="termStockChart"></canvas>';
+                }
+                drawTermStockChart(items, termLabel);
+            } catch (error) {
+                console.error('Error loading term stock graph:', error);
+                if (meta) meta.textContent = 'Error loading current term stock data.';
+            }
+        }
+
+        async function updateStatus() {
+            try {
+                const today = syncDatePickersWithToday();
+                const statusRes = await fetch('/api/status/realtime');
+                const statusData = await statusRes.json();
+
+                const logsRes = await fetch('/api/sales/today');
+                const logsData = await logsRes.json();
+
+                const totalInserted = Number(logsData.total_inserted || logsData.total_sales || 0);
+                const totalChange = Number(logsData.total_change || 0);
+                const totalNetCollected = Number(logsData.total_net_collected || (totalInserted - totalChange));
+                document.getElementById('todaySales').textContent = '\u20B1' + totalInserted.toFixed(2);
+                document.getElementById('changeGiven').textContent = '\u20B1' + totalChange.toFixed(2);
+                document.getElementById('netCollected').textContent = '\u20B1' + totalNetCollected.toFixed(2);
+                document.getElementById('transactions').textContent = logsData.total_transactions || 0;
+                document.getElementById('itemsSold').textContent = Object.values(logsData.items_sold || {}).reduce((a, b) => a + b, 0);
+
+                const grid = document.getElementById('machinesGrid');
+                grid.innerHTML = '';
+                (statusData || []).forEach(machine => {
+                    const lowStockItems = machine.low_stock_items || [];
+                    const itemsList = Object.entries(machine.items_sold_today || {}).map(([name, qty]) => `${name}: ${qty}`).join(', ') || 'None';
+                    const coinStock = machine.coin_change_stock || {};
+                    const one = coinStock.one_peso || {};
+                    const five = coinStock.five_peso || {};
+                    const totalCoinValue = Number(coinStock.total_value || 0);
+                    const oneStatus = String(one.status || 'ok');
+                    const fiveStatus = String(five.status || 'ok');
+
+                    const coinStatusClass = (s) => {
+                        if (s === 'out') return 'coin-status-out';
+                        if (s === 'low') return 'coin-status-low';
+                        return 'coin-status-ok';
+                    };
+
+                    const coinStatusText = (s) => {
+                        if (s === 'out') return 'OUT';
+                        if (s === 'low') return 'LOW';
+                        return 'OK';
+                    };
+                    const card = document.createElement('div');
+                    card.className = 'machine-card';
+                    card.innerHTML = `
+                        <div class="machine-header">
+                            <span class="status-badge">${machine.is_active ? 'Active' : 'Offline'}</span>
+                        </div>
+                        ${lowStockItems.length > 0 ? `<div class="low-stock-alert"><div style="font-weight: bold; color: #c0392b;">Low Stock Alert:</div><div class="alert-items">${lowStockItems.map(escapeHtml).join(', ')}</div></div>` : ''}
+                        <div class="machine-stats">
+                            <div class="stat-box"><div class="stat-label-small">Total Items</div><div class="stat-value-small">${machine.total_items}</div></div>
+                            <div class="stat-box"><div class="stat-label-small">Today's Net</div><div class="stat-value-small">\u20B1${Number(machine.today_net_collected ?? machine.today_sales ?? 0).toFixed(2)}</div></div>
+                        </div>
+                        <div class="coin-stock-box">
+                            <div class="items-sold-title">Change Coins (Hopper)</div>
+                            <div class="coin-stock-line">Total Change Value: <strong>\u20B1${totalCoinValue.toFixed(2)}</strong></div>
+                            <div class="coin-stock-line">₱1: ${Number(one.count || 0)} pcs (threshold ${Number(one.threshold || 0)}) - <span class="${coinStatusClass(oneStatus)}">${coinStatusText(oneStatus)}</span></div>
+                            <div class="coin-stock-line">₱5: ${Number(five.count || 0)} pcs (threshold ${Number(five.threshold || 0)}) - <span class="${coinStatusClass(fiveStatus)}">${coinStatusText(fiveStatus)}</span></div>
+                        </div>
+                        <div class="items-sold"><div class="items-sold-title">Today's Items Sold:</div><div class="items-sold-list">${escapeHtml(itemsList)}</div></div>
+                    `;
+                    grid.appendChild(card);
+                });
+
+                const picker = document.getElementById('logsDatePicker');
+                const selectedDate = autoFollowLogsDate
+                    ? today
+                    : (picker && picker.value ? picker.value : today);
+                if (autoFollowLogsDate && picker) picker.value = today;
+                await loadSalesLogsByDate(selectedDate, 'logsContainer', 'selectedDateLabel');
+
+                await loadDispenseTimeoutAlert();
+                await loadStockAlerts();
+                await loadTermStockGraph();
+                await loadKioskNoticeState();
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+            } catch (error) {
+                console.error('Error updating status:', error);
+            }
+        }
+
+        const today = syncDatePickersWithToday(true);
+
+        const unlockAlertAudio = () => {
+            const ctx = getStockAlertAudioContext();
+            if (ctx && ctx.state === 'suspended') {
+                ctx.resume().catch(() => {});
+            }
+            const timeoutCtx = getTimeoutAlertAudioContext();
+            if (timeoutCtx && timeoutCtx.state === 'suspended') {
+                timeoutCtx.resume().catch(() => {});
+            }
+        };
+        window.addEventListener('pointerdown', unlockAlertAudio, { once: true });
+        window.addEventListener('keydown', unlockAlertAudio, { once: true });
+
+        updateStatus();
+        refreshSensorPanelByMode();
+        loadDispenseTimeoutAlert();
+        loadStockAlerts();
+        loadKioskNoticeState();
+        restoreTimeoutAlarmSetting();
+
+        setInterval(updateStatus, 5000);
+        setInterval(refreshSensorPanelByMode, 900000);
+        setInterval(loadDispenseTimeoutAlert, 3000);
+        setInterval(loadStockAlerts, 10000);
+        setInterval(loadKioskNoticeState, 5000);
+    </script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+

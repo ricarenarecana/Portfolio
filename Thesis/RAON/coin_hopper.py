@@ -1,0 +1,483 @@
+import serial
+try:
+    from serial.tools import list_ports
+except Exception:
+    list_ports = None
+
+import threading
+import time
+from queue import Queue
+import re
+
+class CoinHopper:
+    """Controls coin hoppers for dispensing change via Arduino serial interface.
+    
+    Communicates with arduino_bill_forward.ino to control:
+    - 1 peso coin hopper
+    - 5 peso coin hopper
+    
+    Commands sent to Arduino:
+    - DISPENSE_AMOUNT <amount> [timeout_ms] : Auto-calculate and dispense coins
+    - DISPENSE_DENOM <denom> <count> [timeout_ms] : Dispense exact coin count
+    - OPEN <denom> : Open hopper manually
+    - CLOSE <denom> : Close hopper manually
+    - STATUS : Check hopper status
+    - RELAY_ON : Turn on relays
+    - RELAY_OFF : Turn off relays
+    """
+    
+    def __init__(self, serial_port='/dev/ttyUSB0', baudrate=115200, timeout=2.0, auto_detect=True):
+        """Initialize coin hopper controller via serial.
+        
+        Args:
+            serial_port: Serial port connected to arduino_bill_forward
+            baudrate: Serial communication speed (default 115200)
+            timeout: Serial read timeout in seconds
+            auto_detect: Automatically detect USB serial port if connection fails
+        """
+        self.serial_port = serial_port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.auto_detect = auto_detect
+        self.serial_conn = None
+        self.is_running = False
+        self.read_thread = None
+        self.response_queue = Queue()
+        self._lock = threading.Lock()
+    
+    def _choose_stopbits_for_port(self, port_name: str):
+        """Determine appropriate stopbits based on port name.
+        
+        Args:
+            port_name: Serial port name/path
+            
+        Returns:
+            serial.STOPBITS_ONE or serial.STOPBITS_TWO
+        """
+        if not port_name:
+            return serial.STOPBITS_TWO
+        if 'ttyACM' in port_name or 'ttyUSB' in port_name or 'COM' in port_name:
+            return serial.STOPBITS_ONE
+        return serial.STOPBITS_TWO
+    
+    def _auto_find_usb_serial(self):
+        """Automatically find USB serial port.
+        
+        Returns:
+            Port path if found, None otherwise
+        """
+        ports = []
+        try:
+            if list_ports:
+                for p in list_ports.comports():
+                    ports.append((p.device, p.description))
+            else:
+                import glob
+                for path in glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*'):
+                    ports.append((path, 'tty'))
+        except Exception:
+            return None
+
+        # Prioritize known Arduino/microcontroller chip signatures
+        for dev, desc in ports:
+            d = (desc or '').lower()
+            if 'arduino' in d or 'cp210' in d or 'ftdi' in d or 'ch340' in d or 'usb serial' in d:
+                return dev
+        
+        # If no recognized device, return first available USB port
+        if ports:
+            return ports[0][0]
+        return None
+        
+    def connect(self):
+        """Connect to Arduino via serial port.
+        
+        Returns:
+            True if connection successful, False otherwise
+        """
+        try:
+            stopbits = self._choose_stopbits_for_port(self.serial_port)
+            self.serial_conn = serial.Serial(
+                port=self.serial_port,
+                baudrate=self.baudrate,
+                bytesize=serial.EIGHTBITS,
+                stopbits=stopbits,
+                parity=serial.PARITY_NONE,
+                timeout=self.timeout
+            )
+            self.is_running = True
+            print(f"[CoinHopper] Connected to {self.serial_port} @ {self.baudrate} baud")
+            # Safety: force hopper relays to idle/off on connect.
+            self.ensure_relays_off()
+            return True
+        except Exception as e:
+            print(f"[CoinHopper] Failed to connect to {self.serial_port}: {e}")
+            
+            # Try auto-detection if enabled
+            if self.auto_detect:
+                print("[CoinHopper] Attempting auto-detection of USB serial port...")
+                autodetected = self._auto_find_usb_serial()
+                if autodetected:
+                    try:
+                        stopbits = self._choose_stopbits_for_port(autodetected)
+                        self.serial_conn = serial.Serial(
+                            port=autodetected,
+                            baudrate=self.baudrate,
+                            bytesize=serial.EIGHTBITS,
+                            stopbits=stopbits,
+                            parity=serial.PARITY_NONE,
+                            timeout=self.timeout
+                        )
+                        self.is_running = True
+                        self.serial_port = autodetected  # Update the port for future reference
+                        print(f"[CoinHopper] Auto-detected and connected to {autodetected}")
+                        # Safety: force hopper relays to idle/off on connect.
+                        self.ensure_relays_off()
+                        return True
+                    except Exception as e2:
+                        print(f"[CoinHopper] Auto-detection connection failed: {e2}")
+            
+            return False
+
+    def send_command(self, cmd):
+        """Send command to Arduino and wait for response.
+        
+        Args:
+            cmd: Command string (without newline)
+            
+        Returns:
+            Response from Arduino or None on timeout
+        """
+        if not self.serial_conn or not self.serial_conn.is_open:
+            print("[CoinHopper] Serial connection not open")
+            return None
+            
+        try:
+            with self._lock:
+                # Clear any stale data
+                self.serial_conn.reset_input_buffer()
+                self.serial_conn.reset_output_buffer()
+                
+                # Send command
+                self.serial_conn.write((cmd.strip() + '\n').encode('utf-8'))
+                self.serial_conn.flush()
+                
+                # Use readline() for robust newline handling
+                start = time.time()
+                while time.time() - start < self.timeout:
+                    if self.serial_conn.in_waiting:
+                        try:
+                            response = self.serial_conn.readline()
+                            if response:
+                                return response.decode('utf-8', errors='ignore').strip()
+                        except Exception as e:
+                            print(f"[CoinHopper] Error reading line: {e}")
+                            return None
+                    time.sleep(0.01)  # Small sleep to avoid busy-waiting
+                
+                print(f"[CoinHopper] No response to command: {cmd}")
+                return None
+        except Exception as e:
+            print(f"[CoinHopper] Error sending command: {e}")
+            return None
+
+    def calculate_change(self, amount):
+        """Calculate optimal coin combination for change.
+        
+        Args:
+            amount: Amount of change needed in pesos
+            
+        Returns:
+            Tuple of (num_five_peso, num_one_peso) coins needed
+        """
+        # Use as many 5 peso coins as possible, then ones for remainder
+        num_five = amount // 5
+        remainder = amount % 5
+        num_one = remainder
+        
+        return (num_five, num_one)
+
+    def dispense_change(self, amount, timeout_ms=30000, callback=None):
+        """Dispense specified amount of change using only 5- and 1-peso coins.
+        
+        Args:
+            amount: Amount to dispense in pesos
+            timeout_ms: Timeout for dispensing in milliseconds (per denomination)
+            callback: Optional function to call with status updates
+            
+        Returns:
+            Tuple of (success, dispensed_amount, error_message)
+        """
+        if amount <= 0:
+            return (True, 0, "No change needed")
+        
+        if not self.serial_conn or not self.serial_conn.is_open:
+            return (False, 0, "Serial connection not open")
+        
+        try:
+            num_five, num_one = self.calculate_change(int(amount))
+            if callback:
+                callback(f"Change plan: {num_five} x ₱5, {num_one} x ₱1")
+            
+            dispensed_total = 0
+            # First try ₱5 coins with a shorter timeout to avoid stalling; fall back to ₱1 for the rest.
+            five_timeout = min(timeout_ms, 5000)
+            dispensed_five_val = 0
+            if num_five > 0:
+                if callback:
+                    callback(f"Dispensing ₱5 coins: {num_five}")
+                ok, dispensed, msg = self.dispense_coins(5, num_five, timeout_ms=five_timeout, callback=callback)
+                dispensed_five_val = dispensed * 5
+                dispensed_total += dispensed_five_val
+                if not ok and callback:
+                    callback(f"₱5 fallback: {msg}")
+            # Compute remaining change and cover with ₱1 coins
+            remaining = max(0, int(amount - dispensed_total))
+            if remaining > 0:
+                # add any pre-planned ones plus remainder from fives shortfall
+                ones_to_dispense = max(num_one, remaining)  # ensure we cover remaining value
+                if callback:
+                    callback(f"Dispensing ₱1 coins: {ones_to_dispense}")
+                ok, dispensed_ones, msg = self.dispense_coins(1, ones_to_dispense, timeout_ms=timeout_ms, callback=callback)
+                dispensed_total += dispensed_ones
+                if not ok:
+                    return (False, dispensed_total, f"Failed to dispense ₱1 coins: {msg}")
+            return (True, dispensed_total, "Change dispensed successfully")
+                
+        except Exception as e:
+            error_msg = f"Error dispensing change: {str(e)}"
+            print(f"[CoinHopper] {error_msg}")
+            return (False, 0, error_msg)
+
+    def dispense_coins(self, denomination, count, timeout_ms=30000, callback=None):
+        """Dispense specific denomination and count.
+        
+        Args:
+            denomination: 1 or 5 (peso coins)
+            count: Number of coins to dispense
+            timeout_ms: Timeout for dispensing in milliseconds
+            callback: Optional function to call with status updates
+            
+        Returns:
+            Tuple of (success, dispensed_count, error_message)
+        """
+        if denomination not in (1, 5):
+            return (False, 0, f"Invalid denomination: {denomination}")
+
+        if count <= 0:
+            return (False, 0, "Count must be greater than 0")
+
+        if not self.serial_conn or not self.serial_conn.is_open:
+            return (False, 0, "Serial connection not open")
+
+        try:
+            cmd = f"DISPENSE_DENOM {denomination} {count} {timeout_ms}"
+            denom_label = "ONE" if denomination == 1 else "FIVE"
+            pulse_prefix = f"PULSE {denom_label}"
+            if callback:
+                callback(f"Sending: {cmd}")
+
+            if not self.serial_conn or not self.serial_conn.is_open:
+                return (False, 0, "Serial connection not open")
+
+            self.serial_conn.reset_input_buffer()
+            self.serial_conn.reset_output_buffer()
+            self.serial_conn.write((cmd + '\n').encode('utf-8'))
+            self.serial_conn.flush()
+
+            # Keep fallback wait tight so UI completion isn't delayed when DONE is missed.
+            deadline = time.time() + max(1.0, (timeout_ms / 1000.0) + 1.0)
+            last_pulse_count = 0
+            last_lines = []
+            success_result = None
+
+            with self._lock:
+                while time.time() < deadline:
+                    try:
+                        line_raw = self.serial_conn.readline()
+                        if not line_raw:
+                            continue
+                        line = line_raw.decode('utf-8', errors='ignore').strip()
+                    except Exception:
+                        continue
+
+                    if not line:
+                        continue
+                    upper = line.upper()
+                    if ("DONE " in upper) or ("ERR " in upper) or ("OK START" in upper) or (pulse_prefix in upper):
+                        last_lines.append(line)
+                        if len(last_lines) > 8:
+                            last_lines.pop(0)
+                    if callback and (upper.startswith("DONE ") or upper.startswith("ERR ") or upper.startswith("OK START")):
+                        callback(f"Hopper: {line}")
+                    if pulse_prefix in upper:
+                        m = re.search(rf'{re.escape(pulse_prefix)}\s+(\d+)', upper)
+                        if m:
+                            try:
+                                last_pulse_count = max(last_pulse_count, int(m.group(1)))
+                            except Exception:
+                                pass
+                        if callback:
+                            if last_pulse_count:
+                                callback(f"Hopper: PULSE {denom_label} {last_pulse_count}/{count}")
+                            else:
+                                callback(f"Hopper: {line}")
+                        if last_pulse_count >= count:
+                            success_result = (True, count, f"Dispensed {count} {denomination}-peso coins (inferred from pulses)")
+                            break
+                    if "DONE " in upper and denom_label in upper:
+                        m = re.search(r'DONE\s+\w+\s+(\d+)', upper)
+                        dispensed = int(m.group(1)) if m else count
+                        success_result = (True, dispensed, f"Dispensed {dispensed} {denomination}-peso coins")
+                        break
+                    if "ERR " in upper and denom_label in upper:
+                        # Support multiple Arduino error formats:
+                        # - "ERR TIMEOUT FIVE dispensed:3"
+                        # - "ERR NO COIN FIVE timeout3" (count appended at end)
+                        m = re.search(r'dispensed:\s*(\d+)', line, re.IGNORECASE)
+                        if not m:
+                            m = re.search(r'(\d+)\s*$', line)
+                        dispensed = int(m.group(1)) if m else 0
+                        success_result = (False, dispensed, f"Dispensing failed: {line}")
+                        break
+
+                if success_result:
+                    return success_result
+                if last_pulse_count >= count:
+                    return (True, count, f"Dispensed {count} {denomination}-peso coins (inferred from pulses)")
+
+            if last_lines:
+                tail = " | ".join(last_lines[-3:])
+                msg = f"Dispensing timeout waiting for DONE {denom_label}. {tail}"
+            else:
+                msg = f"Dispensing timeout waiting for DONE {denom_label}"
+            # Fallback: ask Arduino STATUS and use sensor counters when DONE/PULSE
+            # lines were missed on serial but dispensing physically occurred.
+            status_line = self.get_status()
+            status_count = None
+            if status_line:
+                m = re.search(r'ONE:(\d+).*FIVE:(\d+)', status_line, re.IGNORECASE)
+                if m:
+                    try:
+                        one_seen = int(m.group(1))
+                        five_seen = int(m.group(2))
+                        status_count = one_seen if denomination == 1 else five_seen
+                    except Exception:
+                        status_count = None
+            if status_count is not None:
+                dispensed = max(last_pulse_count, max(0, status_count))
+                if callback:
+                    try:
+                        callback(f"Hopper: STATUS inferred {denom_label} {dispensed}/{count}")
+                    except Exception:
+                        pass
+                if dispensed >= count:
+                    return (True, count, f"Dispensed {count} {denomination}-peso coins (inferred from STATUS)")
+                return (False, dispensed, msg)
+
+            return (False, max(0, last_pulse_count), msg)
+
+        except Exception as e:
+            error_msg = f"Error dispensing coins: {str(e)}"
+            print(f"[CoinHopper] {error_msg}")
+            return (False, 0, error_msg)
+
+    def get_status(self):
+        """Get current hopper status.
+        
+        Returns:
+            Status string from Arduino or None on error
+        """
+        if not self.serial_conn or not self.serial_conn.is_open:
+            return None
+        try:
+            with self._lock:
+                self.serial_conn.reset_input_buffer()
+                self.serial_conn.reset_output_buffer()
+                self.serial_conn.write(b"STATUS\n")
+                self.serial_conn.flush()
+
+                start = time.time()
+                # STATUS command emits multiple lines; pick the canonical status line.
+                while time.time() - start < self.timeout:
+                    if not self.serial_conn.in_waiting:
+                        time.sleep(0.01)
+                        continue
+                    raw = self.serial_conn.readline()
+                    if not raw:
+                        continue
+                    line = raw.decode('utf-8', errors='ignore').strip()
+                    if not line:
+                        continue
+                    upper = line.upper()
+                    if upper.startswith("STATUS "):
+                        return line
+                return None
+        except Exception as e:
+            print(f"[CoinHopper] Error getting STATUS: {e}")
+            return None
+
+    def open_hopper(self, denomination):
+        """Manually open a hopper.
+        
+        Args:
+            denomination: 1 or 5
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if denomination not in (1, 5):
+            return False
+        
+        response = self.send_command(f"OPEN {denomination}")
+        return response and "OK" in response
+
+    def close_hopper(self, denomination):
+        """Manually close a hopper.
+        
+        Args:
+            denomination: 1 or 5
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if denomination not in (1, 5):
+            return False
+        
+        response = self.send_command(f"CLOSE {denomination}")
+        return response and "OK" in response
+
+    def ensure_relays_off(self):
+        """Force hopper motors/relays to OFF/idle state."""
+        if not self.serial_conn or not self.serial_conn.is_open:
+            return False
+        try:
+            # Use fast best-effort writes to avoid blocking UI handoff on slow/missing replies.
+            with self._lock:
+                for cmd in ("STOP", "CLOSE 1", "CLOSE 5"):
+                    try:
+                        self.serial_conn.write((cmd + '\n').encode('utf-8'))
+                    except Exception:
+                        continue
+                try:
+                    self.serial_conn.flush()
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            print(f"[CoinHopper] Error forcing relays off: {e}")
+            return False
+
+    def disconnect(self):
+        """Close serial connection."""
+        try:
+            self.is_running = False
+            if self.serial_conn and self.serial_conn.is_open:
+                self.serial_conn.close()
+                print("[CoinHopper] Serial connection closed")
+        except Exception as e:
+            print(f"[CoinHopper] Error during disconnect: {e}")
+    
+    def cleanup(self):
+        """Alias for disconnect for compatibility."""
+        self.disconnect()

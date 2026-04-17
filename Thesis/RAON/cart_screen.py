@@ -1,0 +1,1927 @@
+﻿import tkinter as tk
+from tkinter import font as tkfont
+from tkinter import messagebox, ttk
+import threading
+import re
+from payment_handler import PaymentHandler
+from system_status_panel import SystemStatusPanel
+from daily_sales_logger import get_logger
+from arduino_serial_utils import detect_arduino_serial_port
+from fix_paths import get_absolute_path
+try:
+    from stock_tracker import get_tracker
+    STOCK_TRACKER_AVAILABLE = True
+except ImportError:
+    STOCK_TRACKER_AVAILABLE = False
+    print("[CartScreen] WARNING: stock_tracker not available")
+
+
+class CartScreen(tk.Frame):
+    def __init__(self, parent, controller):
+        tk.Frame.__init__(self, parent, bg="#f0f4f8")
+        self.controller = controller
+        self.buyer_info = None  # program/year/section metadata
+        self.program_options = [
+            "BSEE", "BSEcE", "BSIT", "BETET", "BETELXT", "BETICT", "BETMECT",
+            "BETVTEd-ET", "BETVTEd-ELXT", "BETVTEd-ICT-CH", "BETVTEd-ICT-CP",
+            "BSCE", "BETCHT", "BSES", "BETCT", "BSME", "BETAT", "BETDMT",
+            "BETEMT", "BETHVAC/RT", "BETMT", "BETNDT", "Faculty Member", "Not Applicable"
+        ]
+        # Initialize payment handler with coin hoppers from config
+        # If TB74 is connected to the ESP32 and the ESP32 forwards bill events,
+        # enable esp32 proxy mode and supply the serial port or host from config.
+        bill_cfg = controller.config.get('hardware', {}).get('bill_acceptor', {}) if isinstance(controller.config, dict) else {}
+        configured_bill_serial = bill_cfg.get('serial_port')
+        bill_serial = detect_arduino_serial_port(preferred_port=configured_bill_serial)
+        bill_baud = bill_cfg.get('baudrate') or bill_cfg.get('serial_baud')
+        # TB74 is directly connected to Arduino Uno (not proxied through ESP32)
+        # It connects via USB serial (default /dev/ttyUSB0)
+        esp32_mode = False  # Disabled: TB74 is on Arduino USB, not ESP32
+        
+        # Get coin acceptor config
+        coin_cfg = controller.config.get('hardware', {}).get('coin_acceptor', {}) if isinstance(controller.config, dict) else {}
+        # Default to serial because coin/bill are on Arduino Uno in this wiring layout.
+        use_gpio_coin = coin_cfg.get('use_gpio', False)
+        coin_gpio_pin = coin_cfg.get('gpio_pin', 17)  # Default GPIO 17
+        hopper_cfg = controller.config.get('hardware', {}).get('coin_hopper', {}) if isinstance(controller.config, dict) else {}
+        hopper_serial = detect_arduino_serial_port(preferred_port=hopper_cfg.get('serial_port') or bill_serial)
+        hopper_baud = hopper_cfg.get('baudrate', 115200)
+
+        self.payment_handler = PaymentHandler(
+            controller.config,
+            coin_port=bill_serial,
+            coin_baud=115200,
+            bill_port=bill_serial,
+            bill_baud=bill_baud,
+            bill_esp32_mode=esp32_mode,
+            bill_esp32_serial_port=None,
+            bill_esp32_host=None,
+            bill_esp32_port=5000,
+            coin_hopper_port=hopper_serial,
+            coin_hopper_baud=hopper_baud,
+            use_gpio_coin=use_gpio_coin,
+            coin_gpio_pin=coin_gpio_pin
+        )  # Coin/bill/hopper are expected on Arduino Uno serial by default
+        self.payment_in_progress = False
+        self.payment_received = 0.0
+        self.payment_required = 0.0
+        self.change_label = None  # Will be created in the payment window
+        self.change_progress_label = None  # Live hopper pulse progress in payment window
+        self.change_alert_shown = False  # Prevent duplicate hopper timeout alerts
+        self.last_change_status = None  # Deduplicate noisy hopper status messages
+        self.payment_completion_scheduled = False
+        self._complete_after_id = None
+        self._return_to_start_after_id = None
+        self._payment_complete_notice = None
+        self._payment_notice_countdown_after_id = None
+        self.coin_received = 0.0  # Track coins separately
+        self.bill_received = 0.0  # Track bills separately
+        
+        # Initialize stock tracker for inventory management
+        self.stock_tracker = None
+        if STOCK_TRACKER_AVAILABLE:
+            try:
+                web_app_host = controller.config.get('web_app_host', 'localhost') if isinstance(controller.config, dict) else 'localhost'
+                web_app_port = controller.config.get('web_app_port', 5000) if isinstance(controller.config, dict) else 5000
+                machine_id = controller.config.get('machine_id', 'RAON-001') if isinstance(controller.config, dict) else 'RAON-001'
+                self.stock_tracker = get_tracker(
+                    host=web_app_host,
+                    port=web_app_port,
+                    machine_id=machine_id
+                )
+                print(f"[CartScreen] Stock tracker initialized: {machine_id} -> {web_app_host}:{web_app_port}")
+            except Exception as e:
+                print(f"[CartScreen] Failed to initialize stock tracker: {e}")
+        
+        # --- Colors and Fonts ---
+        self.colors = {
+            "background": "#f0f4f8",
+            "text_fg": "#2c3e50",
+            "gray_fg": "#7f8c8d",
+            "border": "#dfe6e9",
+            "header_bg": "#ffffff",
+            "total_fg": "#2a3eb1",
+            "payment_bg": "#eaf0ff",
+            "payment_fg": "#1f2f85",
+            "primary_btn_bg": "#2222a8",
+            "primary_btn_hover": "#2f3fc6",
+            "secondary_btn_bg": "#4a63d9",
+            "secondary_btn_hover": "#5b73e2",
+        }
+        self.fonts = {
+            "header": tkfont.Font(family="Helvetica", size=24, weight="bold"),
+            "item_name": tkfont.Font(family="Helvetica", size=16, weight="bold"),
+            "item_details": tkfont.Font(family="Helvetica", size=14),
+            "total": tkfont.Font(family="Helvetica", size=20, weight="bold"),
+            "qty_btn": tkfont.Font(family="Helvetica", size=14, weight="bold"),
+            "action_button": tkfont.Font(family="Helvetica", size=18, weight="bold"),
+        }
+        screen_height = controller.winfo_screenheight()
+        self.touch_dead_zone_top_px = 100
+        self.touch_dead_zone_bottom_start_px = 1700
+        self.touch_dead_zone_bottom_px = max(0, int(screen_height - self.touch_dead_zone_bottom_start_px))
+
+        # --- Header ---
+        header = tk.Frame(
+            self,
+            bg="#2222a8",
+            height=max(96, self.touch_dead_zone_top_px + 46),
+        )
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Label(
+            header,
+            text="Your Cart",
+            font=self.fonts["header"],
+            bg=header["bg"],
+            fg="#ffffff",
+        ).pack(pady=(self.touch_dead_zone_top_px, 8))
+
+        # --- Main content area for cart items (scrollable) ---
+        scroll_wrap = tk.Frame(self, bg=self.colors["background"])
+        scroll_wrap.pack(fill="both", expand=True, padx=50, pady=(10, 6))
+        self.cart_scroll_canvas = tk.Canvas(
+            scroll_wrap,
+            bg=self.colors["background"],
+            highlightthickness=0
+        )
+        self.cart_scroll_canvas.pack(side="left", fill="both", expand=True)
+        scroll_bar = tk.Scrollbar(
+            scroll_wrap,
+            orient="vertical",
+            command=self.cart_scroll_canvas.yview
+        )
+        scroll_bar.pack(side="right", fill="y")
+        self.cart_scroll_canvas.configure(yscrollcommand=scroll_bar.set)
+        self.cart_items_frame = tk.Frame(self.cart_scroll_canvas, bg=self.colors["background"])
+        self.cart_scroll_canvas.create_window((0, 0), window=self.cart_items_frame, anchor="nw")
+
+        def _sync_scroll_region(event=None):
+            try:
+                self.cart_scroll_canvas.configure(scrollregion=self.cart_scroll_canvas.bbox("all"))
+            except Exception:
+                pass
+        self.cart_items_frame.bind("<Configure>", _sync_scroll_region)
+
+        # Mouse/touch scrolling
+        def _on_mousewheel(event):
+            try:
+                delta = event.delta
+                if delta == 0 and event.num in (4, 5):
+                    delta = 120 if event.num == 4 else -120
+                self.cart_scroll_canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+            except Exception:
+                pass
+            return "break"
+
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.cart_scroll_canvas.bind_all(seq, _on_mousewheel)
+
+        # --- Footer for totals ---
+        footer = tk.Frame(self, bg=self.colors["background"])
+        footer.pack(fill="x", padx=50, pady=(0, 10))
+
+        self.total_label = tk.Label(
+            footer,
+            font=self.fonts["total"],
+            bg=footer["bg"],
+            fg=self.colors["total_fg"],
+        )
+        self.total_label.pack(pady=(0, 8))
+
+        # Keep primary actions in lower touchable area (above status zone).
+        action_bar = tk.Frame(self, bg=self.colors["background"])
+        action_bar.pack(fill="x", padx=50, pady=(0, 10))
+
+        back_button = tk.Button(
+            action_bar,
+            text="Back to Shopping",
+            font=self.fonts["action_button"],
+            bg=self.colors["secondary_btn_bg"],
+            fg="#ffffff",
+            activebackground=self.colors["secondary_btn_hover"],
+            activeforeground="#ffffff",
+            relief="flat",
+            pady=10,
+            command=lambda: controller.show_kiosk(),
+        )
+        back_button.pack(side="left", expand=True, fill="x", padx=(0, 5))
+        self._style_button(back_button, hover_bg=self.colors["secondary_btn_hover"])
+
+        self.checkout_button = tk.Button(
+            action_bar,
+            text="Pay",
+            font=self.fonts["action_button"],
+            bg=self.colors["primary_btn_bg"],
+            fg="#ffffff",
+            activebackground=self.colors["primary_btn_hover"],
+            activeforeground="#ffffff",
+            relief="flat",
+            pady=10,
+            command=self.handle_checkout,  # Using our new coin payment handler
+        )
+        self.checkout_button.pack(side="left", expand=True, fill="x", padx=(5, 0))
+        self._style_button(self.checkout_button, hover_bg=self.colors["primary_btn_hover"])
+
+        # --- System Status Panel ---
+        status_zone_height = self.touch_dead_zone_bottom_px if self.touch_dead_zone_bottom_px > 0 else 120
+        self.status_zone = tk.Frame(self, bg="#111111", height=status_zone_height)
+        self.status_zone.pack(side="bottom", fill="x")
+        self.status_zone.pack_propagate(False)
+
+        self.status_panel = SystemStatusPanel(self.status_zone, controller=self.controller)
+        self.status_panel.pack(fill='both', expand=True)
+
+    def _style_button(self, btn, hover_bg=None, hover_fg=None):
+        base_bg = btn.cget("bg")
+        base_fg = btn.cget("fg")
+        btn.configure(
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            cursor="hand2",
+            activebackground=hover_bg or base_bg,
+            activeforeground=hover_fg or base_fg,
+            padx=12,
+            pady=10,
+        )
+
+        def _on_enter(_event):
+            if hover_bg:
+                btn.configure(bg=hover_bg)
+            if hover_fg:
+                btn.configure(fg=hover_fg)
+
+        def _on_leave(_event):
+            btn.configure(bg=base_bg, fg=base_fg)
+
+        btn.bind("<Enter>", _on_enter)
+        btn.bind("<Leave>", _on_leave)
+
+    def update_cart(self, cart_items):
+        # Clear previous items
+        for widget in self.cart_items_frame.winfo_children():
+            widget.destroy()
+
+        if not cart_items:
+            tk.Label(
+                self.cart_items_frame,
+                text="Your cart is empty.",
+                font=self.fonts["item_name"],
+                bg=self.colors["background"],
+                fg=self.colors["gray_fg"],
+            ).pack(pady=50)
+            self.total_label.config(text="")
+            self.checkout_button.config(state="disabled")
+            try:
+                self.cart_scroll_canvas.yview_moveto(0)
+            except Exception:
+                pass
+            return
+
+        grand_total = 0
+        self.checkout_button.config(state="normal")
+        for item_info in cart_items:
+            item = item_info["item"]
+            quantity = item_info["quantity"]
+            total_price = item["price"] * quantity
+            grand_total += total_price
+
+            item_frame = tk.Frame(
+                self.cart_items_frame,
+                bg="white",
+                highlightbackground=self.colors["border"],
+                highlightthickness=1,
+            )
+            item_frame.pack(fill="x", pady=5)
+            item_frame.grid_columnconfigure(0, weight=1, minsize=360)
+            item_frame.grid_columnconfigure(1, weight=0)
+
+            # --- Left side: Name and Price ---
+            info_frame = tk.Frame(item_frame, bg="white")
+            info_frame.grid(row=0, column=0, padx=15, pady=10, sticky="nsew")
+            raw_name = (
+                f"{item['name']} (Slot {item.get('_slot_number')})"
+                if item.get('_slot_number') is not None
+                else item["name"]
+            )
+            display_name = str(raw_name)
+            if len(display_name) > 68:
+                display_name = display_name[:65].rstrip() + "..."
+
+            name_label = tk.Label(
+                info_frame,
+                text=display_name,
+                font=self.fonts["item_name"],
+                bg="white",
+                fg=self.colors["text_fg"],
+                anchor="w",
+                justify="left",
+                wraplength=680,
+            )
+            name_label.pack(fill="x")
+
+            details_label = tk.Label(
+                info_frame,
+                text=f"{self.controller.currency_symbol}{item['price']:.2f} each",
+                font=self.fonts["item_details"],
+                bg="white",
+                fg=self.colors["gray_fg"],
+                anchor="w",
+            )
+            details_label.pack(fill="x")
+
+            # --- Right side: Controls and Total ---
+            controls_frame = tk.Frame(item_frame, bg="white")
+            # Keep action controls lower for easier touch access in cart view.
+            controls_frame.grid(row=0, column=1, padx=15, pady=(24, 10), sticky="se")
+
+            # Quantity adjustment
+            qty_frame = tk.Frame(controls_frame, bg="white")
+            qty_frame.pack(side="left", padx=20, pady=(10, 0))
+
+            decrease_btn = tk.Button(
+                qty_frame,
+                text="-",
+                font=self.fonts["qty_btn"],
+                bg=self.colors["background"],
+                fg=self.colors["text_fg"],
+                relief="flat",
+                width=2,
+                command=lambda i=item: self.controller.decrease_cart_item_quantity(i),
+            )
+            decrease_btn.pack(side="left")
+            self._style_button(decrease_btn, hover_bg="#dbe4ff")
+
+            qty_label = tk.Label(
+                qty_frame,
+                text=str(quantity),
+                font=self.fonts["item_details"],
+                bg="white",
+                fg=self.colors["text_fg"],
+                width=3,
+            )
+            qty_label.pack(side="left", padx=5)
+
+            increase_btn = tk.Button(
+                qty_frame,
+                text="+",
+                font=self.fonts["qty_btn"],
+                bg=self.colors["background"],
+                fg=self.colors["text_fg"],
+                relief="flat",
+                width=2,
+                command=lambda i=item: self.controller.increase_cart_item_quantity(i),
+            )
+            increase_btn.pack(side="left")
+            self._style_button(increase_btn, hover_bg="#dbe4ff")
+
+            # Total price for the item line
+            price_label = tk.Label(
+                controls_frame,
+                text=f"{self.controller.currency_symbol}{total_price:.2f}",
+                font=self.fonts["item_name"],
+                bg="white",
+                fg=self.colors["total_fg"],
+                width=12,
+                anchor="e",
+            )
+            price_label.pack(side="left", padx=(12, 20), pady=(10, 0))
+
+            # Delete button
+            delete_btn = tk.Button(
+                controls_frame,
+                text="Remove",
+                font=self.fonts["qty_btn"],
+                bg="white",
+                fg="#e74c3c",
+                relief="flat",
+                command=lambda i=item: self.controller.remove_from_cart(i),
+            )
+            delete_btn.pack(side="left", pady=(10, 0))
+            self._style_button(delete_btn, hover_bg="#ffe7ea")
+
+        try:
+            self.cart_scroll_canvas.yview_moveto(0)
+        except Exception:
+            pass
+
+        self.total_label.config(
+            text=f"Total: {self.controller.currency_symbol}{grand_total:.2f}"
+        )
+
+    def _prompt_buyer_info(self):
+        """Prompt buyer to select program, year, and section before payment."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Buyer Info")
+        dialog.configure(bg="white")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        try:
+            dialog.update_idletasks()
+            screen_w = dialog.winfo_screenwidth()
+            screen_h = dialog.winfo_screenheight()
+            dialog.geometry(f"{screen_w}x{screen_h}+0+0")
+            dialog.attributes("-fullscreen", True)
+            dialog.lift()
+            dialog.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        label_font = ("Helvetica", 18, "bold")
+        menu_font = ("Helvetica", 18)
+        btn_font = ("Helvetica", 18, "bold")
+
+        # Header with logo and machine name
+        header = tk.Frame(dialog, bg="#2222a8", height=150)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        header_inner = tk.Frame(header, bg="#2222a8")
+        header_inner.pack(fill="both", expand=True, padx=28, pady=18)
+
+        logo_image = None
+        try:
+            logo_path = get_absolute_path("LOGO.png")
+            logo_image = tk.PhotoImage(file=logo_path)
+            dialog._logo_ref = logo_image  # prevent garbage collection
+            tk.Label(header_inner, image=logo_image, bg="#2222a8").pack(side="left", padx=(0, 16))
+        except Exception:
+            logo_image = None
+
+        tk.Label(
+            header_inner,
+            text="RAON VENDING",
+            fg="white",
+            bg="#2222a8",
+            font=("Helvetica", 32, "bold")
+        ).pack(side="left")
+
+        content = tk.Frame(dialog, bg="white")
+        content.pack(fill="both", expand=True, pady=(30, 10))
+
+        tk.Label(
+            content,
+            text="Fill the form to generate order number",
+            bg="white",
+            fg="#2222a8",
+            font=("Helvetica", 24, "bold")
+        ).pack(pady=(8, 10))
+
+        program_var = tk.StringVar(value=self.program_options[0])
+        year_var = tk.StringVar(value="N/A")
+        section_var = tk.StringVar(value="N/A")
+
+        def open_option_selector(title, options, target_var):
+            selector = tk.Toplevel(dialog)
+            selector.title(title)
+            selector.configure(bg="white")
+            selector.transient(dialog)
+            selector.grab_set()
+            try:
+                selector.update_idletasks()
+                sw, sh = selector.winfo_screenwidth(), selector.winfo_screenheight()
+                selector.geometry(f"{sw}x{sh}+0+0")
+                selector.attributes("-fullscreen", True)
+                selector.lift()
+                selector.attributes("-topmost", True)
+            except Exception:
+                pass
+
+            top = tk.Frame(selector, bg="#2222a8", height=140)
+            top.pack(fill="x")
+            top.pack_propagate(False)
+
+            top_inner = tk.Frame(top, bg="#2222a8")
+            top_inner.pack(fill="both", expand=True, padx=24, pady=14)
+
+            sel_logo = None
+            try:
+                sel_logo_path = get_absolute_path("LOGO.png")
+                sel_logo = tk.PhotoImage(file=sel_logo_path)
+                selector._logo_ref = sel_logo
+                tk.Label(top_inner, image=sel_logo, bg="#2222a8").pack(side="left", padx=(0, 14))
+            except Exception:
+                sel_logo = None
+
+            tk.Label(
+                top_inner,
+                text="RAON VENDING",
+                fg="white",
+                bg="#2222a8",
+                font=("Helvetica", 30, "bold")
+            ).pack(side="left")
+
+            tk.Label(
+                top_inner,
+                text=title,
+                fg="white",
+                bg="#2222a8",
+                font=("Helvetica", 24, "bold")
+            ).pack(side="right")
+
+            body = tk.Frame(selector, bg="white")
+            body.pack(fill="both", expand=True, padx=20, pady=20)
+
+            # Compact centered list with touch drag scrolling
+            list_wrapper = tk.Frame(body, bg="white", width=720)
+            list_wrapper.pack(expand=True)
+            list_wrapper.pack_propagate(False)
+
+            canvas = tk.Canvas(list_wrapper, bg="white", highlightthickness=0)
+            scrollbar = tk.Scrollbar(list_wrapper, orient="vertical", command=canvas.yview)
+            scroll_frame = tk.Frame(canvas, bg="white")
+            scroll_frame.bind(
+                "<Configure>",
+                lambda _e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            scroll_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            def _sync_width(event):
+                try:
+                    canvas.itemconfig(scroll_window, width=event.width)
+                except Exception:
+                    pass
+            canvas.bind("<Configure>", _sync_width)
+
+            def _on_press(e):
+                canvas.scan_mark(e.x, e.y)
+            def _on_drag(e):
+                canvas.scan_dragto(e.x, e.y, gain=1)
+            canvas.bind("<ButtonPress-1>", _on_press)
+            canvas.bind("<B1-Motion>", _on_drag)
+
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            for opt in options:
+                btn = tk.Button(
+                    scroll_frame,
+                    text=opt,
+                    font=("Helvetica", 22, "bold"),
+                    bg="#f3f4f6",
+                    fg="#111",
+                    relief="flat",
+                    padx=18,
+                    pady=14,
+                    anchor="w",
+                    command=lambda val=opt: (target_var.set(val), selector.destroy())
+                )
+                btn.pack(fill="x", pady=6)
+                self._style_button(btn, hover_bg="#e5e7eb")
+
+            close_btn = tk.Button(
+                scroll_frame,
+                text="Cancel",
+                font=("Helvetica", 20, "bold"),
+                bg="#e0e0e0",
+                fg="#111",
+                relief="flat",
+                command=selector.destroy,
+                padx=12,
+                pady=10
+            )
+            close_btn.pack(fill="x", pady=(12, 0))
+            self._style_button(close_btn, hover_bg="#d5d5d5")
+
+            status_zone = tk.Frame(selector, bg="#111111", height=320)
+            status_zone.pack(side="bottom", fill="x")
+            status_zone.pack_propagate(False)
+            try:
+                SystemStatusPanel(status_zone, controller=self.controller, panel_height=320).pack(fill="both", expand=True)
+            except Exception:
+                pass
+
+            selector.wait_window(selector)
+
+        chooser = tk.Frame(content, bg="white")
+        chooser.pack(pady=(30, 30), fill="x")
+
+        def build_cycle_row(label_text, var, options, width=20):
+            row = tk.Frame(chooser, bg="white")
+            row.pack(pady=6)
+            tk.Label(row, text=label_text, bg="white", fg="#222", font=label_font).pack(side="left", padx=(0, 12))
+            btn_font_local = ("Helvetica", 16, "bold")
+            def cycle(delta):
+                current = var.get()
+                try:
+                    idx = options.index(current)
+                except ValueError:
+                    idx = 0
+                idx = (idx + delta) % len(options)
+                var.set(options[idx])
+            up = tk.Button(row, text="▲", font=btn_font_local, width=3, bg="#eaf0ff", fg="#1f2f85",
+                           relief="flat", command=lambda: cycle(-1))
+            up.pack(side="left")
+            tk.Label(row, textvariable=var, width=width, bg="#f3f4f6", fg="#111", font=("Helvetica", 18, "bold"),
+                     relief="flat").pack(side="left", padx=8)
+            down = tk.Button(row, text="▼", font=btn_font_local, width=3, bg="#eaf0ff", fg="#1f2f85",
+                             relief="flat", command=lambda: cycle(1))
+            down.pack(side="left")
+            for b in (up, down):
+                self._style_button(b, hover_bg="#dfe8ff")
+
+        build_cycle_row("Program / Affiliation", program_var, self.program_options, width=26)
+        build_cycle_row("Year", year_var, ["1", "2", "3", "4", "N/A"], width=6)
+        build_cycle_row("Section", section_var, ["A", "B", "Test", "N/A"], width=8)
+
+        result = {"confirmed": False}
+
+        def on_ok():
+            result["confirmed"] = True
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btn_frame = tk.Frame(content, bg="white")
+        btn_frame.pack(pady=36)
+        ok_btn = tk.Button(btn_frame, text="OK", width=16, height=2, command=on_ok, bg="#1d976c", fg="white", relief="flat", font=btn_font)
+        cancel_btn = tk.Button(btn_frame, text="Cancel", width=16, height=2, command=on_cancel, bg="#e0e0e0", fg="#333", relief="flat", font=btn_font)
+        ok_btn.grid(row=0, column=0, padx=14)
+        cancel_btn.grid(row=0, column=1, padx=14)
+
+        self._style_button(ok_btn, hover_bg="#15805a")
+        self._style_button(cancel_btn, hover_bg="#d0d0d0")
+
+        # Bottom system status bar (same footprint as kiosk)
+        status_zone = tk.Frame(dialog, bg="#111111", height=320)
+        status_zone.pack(side="bottom", fill="x")
+        status_zone.pack_propagate(False)
+        try:
+            SystemStatusPanel(status_zone, controller=self.controller, panel_height=320).pack(fill="both", expand=True)
+        except Exception:
+            pass
+
+        dialog.wait_window(dialog)
+
+        if not result["confirmed"]:
+            return None
+        return {
+            "program": program_var.get().strip(),
+            "year": year_var.get().strip(),
+            "section": section_var.get().strip()
+        }
+
+    def _prompt_issue_report(self, or_number=None):
+        """Prompt user to report an issue after transaction."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Transaction Feedback")
+        dialog.configure(bg="white")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        try:
+            dialog.update_idletasks()
+            screen_w = dialog.winfo_screenwidth()
+            screen_h = dialog.winfo_screenheight()
+            dialog.geometry(f"{screen_w}x{screen_h}+0+0")
+            dialog.attributes("-fullscreen", True)
+            dialog.lift()
+            dialog.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        label_font = ("Helvetica", 17, "bold")
+        btn_font = ("Helvetica", 17, "bold")
+
+        # Header with logo + brand (match course selection styling)
+        header = tk.Frame(dialog, bg="#2222a8", height=150)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        header_inner = tk.Frame(header, bg="#2222a8")
+        header_inner.pack(fill="both", expand=True, padx=28, pady=18)
+
+        try:
+            logo_path = get_absolute_path("LOGO.png")
+            logo_img = tk.PhotoImage(file=logo_path)
+            dialog._logo_ref_issue = logo_img
+            tk.Label(header_inner, image=logo_img, bg="#2222a8").pack(side="left", padx=(0, 16))
+        except Exception:
+            pass
+
+        tk.Label(
+            header_inner,
+            text="RAON VENDING",
+            fg="white",
+            bg="#2222a8",
+            font=("Helvetica", 32, "bold")
+        ).pack(side="left")
+
+        content = tk.Frame(dialog, bg="white")
+        content.pack(fill="both", expand=True, pady=(20, 10))
+
+        tk.Label(content, text="Did you encounter any issue with this transaction?",
+                 bg="white", fg="#222", font=label_font,
+                 wraplength=620, justify="center").pack(pady=(6, 14))
+
+        options = [
+            "Item not dispensed",
+            "Wrong item dispensed",
+            "Wrong quantity dispensed",
+            "Wrong payment recorded",
+            "Payment not recognized",
+            "No change",
+            "Wrong change",
+            "Others"
+        ]
+
+        # Compact selector with cycling arrows (matching course selector style)
+        row = tk.Frame(content, bg="white")
+        row.pack(pady=(10, 24))
+        tk.Label(row, text="Issue:", bg="white", fg="#222", font=label_font).pack(side="left", padx=(0, 12))
+        issue_var = tk.StringVar(value=options[0])
+        sel_display = tk.Label(row, textvariable=issue_var, bg="#f3f4f6", fg="#111",
+                               font=("Helvetica", 18, "bold"), width=32, anchor="w", relief="flat")
+        sel_display.pack(side="left", padx=10)
+
+        btn_font_local = ("Helvetica", 16, "bold")
+        def cycle(delta):
+            current = issue_var.get()
+            try:
+                idx = options.index(current)
+            except ValueError:
+                idx = 0
+            idx = (idx + delta) % len(options)
+            issue_var.set(options[idx])
+        up = tk.Button(row, text="▲", font=btn_font_local, width=3, bg="#eaf0ff", fg="#1f2f85",
+                       relief="flat", command=lambda: cycle(-1))
+        down = tk.Button(row, text="▼", font=btn_font_local, width=3, bg="#eaf0ff", fg="#1f2f85",
+                         relief="flat", command=lambda: cycle(1))
+        up.pack(side="left")
+        down.pack(side="left", padx=(8, 0))
+        for b in (up, down):
+            self._style_button(b, hover_bg="#dfe8ff")
+
+        result = {"issue": None, "answered": False}
+
+        def auto_skip():
+            result["issue"] = None
+            result["answered"] = True
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        timer_id = None
+        try:
+            timer_id = dialog.after(30000, auto_skip)
+        except Exception:
+            timer_id = None
+
+        def on_yes():
+            sel = issue_var.get().strip()
+            result["issue"] = sel
+            result["answered"] = True
+            if timer_id:
+                try:
+                    dialog.after_cancel(timer_id)
+                except Exception:
+                    pass
+            dialog.destroy()
+
+        def on_no():
+            result["issue"] = None
+            result["answered"] = True
+            if timer_id:
+                try:
+                    dialog.after_cancel(timer_id)
+                except Exception:
+                    pass
+            dialog.destroy()
+
+        btn_frame = tk.Frame(content, bg="white")
+        btn_frame.pack(pady=22)
+        yes_btn = tk.Button(btn_frame, text="Submit", width=16, height=2, command=on_yes, bg="#1d976c", fg="white", relief="flat", font=btn_font)
+        no_btn = tk.Button(btn_frame, text="Skip", width=16, height=2, command=on_no, bg="#e0e0e0", fg="#333", relief="flat", font=btn_font)
+        yes_btn.grid(row=0, column=0, padx=16)
+        no_btn.grid(row=0, column=1, padx=16)
+        self._style_button(yes_btn, hover_bg="#15805a")
+        self._style_button(no_btn, hover_bg="#d0d0d0")
+
+        # Bottom system status (match kiosk/course screens)
+        status_zone = tk.Frame(dialog, bg="#111111", height=320)
+        status_zone.pack(side="bottom", fill="x")
+        status_zone.pack_propagate(False)
+        try:
+            SystemStatusPanel(status_zone, controller=self.controller, panel_height=320).pack(fill="both", expand=True)
+        except Exception:
+            pass
+
+        dialog.wait_window(dialog)
+        if not result["answered"]:
+            return None
+        return result["issue"]
+
+    def handle_checkout(self):
+        """Process the checkout with coin payment using Allan 123A-Pro."""
+        if not self.controller.cart:
+            return
+
+        # Collect buyer metadata (program/year/section) before payment.
+        info = self._prompt_buyer_info()
+        if not info:
+            return
+        self.buyer_info = info
+
+        # Calculate total amount needed
+        total_amount = sum(item["item"]["price"] * item["quantity"] for item in self.controller.cart)
+        
+        if not self.payment_in_progress:
+            # Start payment session
+            self.payment_in_progress = True
+            self.payment_finalized = False
+            # Reset per-transaction vend guards
+            self._vend_started = False
+            self._vend_token = None
+            try:
+                self.controller._vend_busy = False
+            except Exception:
+                pass
+            self.payment_required = total_amount
+            self.payment_received = 0.0
+            self.change_alert_shown = False
+            self.last_change_status = None
+            self.payment_completion_scheduled = False
+            self._complete_after_id = None
+            # Start payment session and register callbacks for immediate updates
+            # Pass UI change-status callback so dispensing progress can be shown
+            try:
+                self.payment_handler.start_payment_session(total_amount, on_payment_update=self._on_payment_update, on_change_update=self.update_change_status)
+            except TypeError:
+                # Backwards compatibility: older PaymentHandler might not accept on_change_update
+                self.payment_handler.start_payment_session(total_amount, on_payment_update=self._on_payment_update)
+            
+            # Create fullscreen payment status window for kiosk readability.
+            self.payment_window = tk.Toplevel(self)
+            self.payment_window.title("Insert Payment")
+            payment_wraplength = 900
+            try:
+                self.payment_window.update_idletasks()
+                screen_w = self.payment_window.winfo_screenwidth()
+                screen_h = self.payment_window.winfo_screenheight()
+                self.payment_window.geometry(f"{screen_w}x{screen_h}+0+0")
+                self.payment_window.attributes("-fullscreen", True)
+                payment_wraplength = max(800, int(screen_w * 0.84))
+            except Exception:
+                pass
+            # Attach to the main toplevel window so focus and touch events work
+            parent_toplevel = self.winfo_toplevel()
+            try:
+                self.payment_window.transient(parent_toplevel)
+            except Exception:
+                pass
+            # Keep it above the fullscreen app and force focus
+            try:
+                self.payment_window.attributes('-topmost', True)
+            except Exception:
+                pass
+            # Note: modal grabs can interfere with touchscreen events on some systems.
+            # Disable grab_set to avoid blocking touch/click events; rely on focused transient window.
+            try:
+                # self.payment_window.grab_set()  # Disabled for touch compatibility
+                print("DEBUG: Payment window opened (grab_set disabled for touch compatibility)")
+            except Exception:
+                pass
+            try:
+                self.payment_window.focus_force()
+                self.payment_window.focus_set()
+            except Exception:
+                pass
+
+            # Ensure the window close button triggers cancellation
+            try:
+                self.payment_window.protocol("WM_DELETE_WINDOW", self.cancel_payment)
+            except Exception:
+                pass
+
+            # Bind ESC key to cancel payment
+            self.payment_window.bind('<Escape>', lambda e: self.cancel_payment())
+            
+            # Styling
+            self.payment_window.configure(bg=self.colors["payment_bg"])
+            big_title_font = tkfont.Font(family="Helvetica", size=32, weight="bold")
+            big_amount_font = tkfont.Font(family="Helvetica", size=54, weight="bold")
+            big_status_font = tkfont.Font(family="Helvetica", size=24)
+            section_title_font = tkfont.Font(family="Helvetica", size=20, weight="bold")
+            item_list_font = tkfont.Font(family="Helvetica", size=18)
+
+            header_bar = tk.Frame(self.payment_window, bg="#2222a8", height=96)
+            header_bar.pack(fill="x")
+            header_bar.pack_propagate(False)
+            tk.Label(
+                header_bar,
+                text="Insert Payment",
+                font=big_title_font,
+                bg="#2222a8",
+                fg="white"
+            ).pack(pady=18)
+
+            # Amount required
+            amount_frame = tk.Frame(self.payment_window, bg=self.colors["payment_bg"])
+            amount_frame.pack(fill="x", pady=(30, 0))
+            
+            tk.Label(
+                amount_frame,
+                text="Amount Required:",
+                font=big_title_font,
+                bg=self.colors["payment_bg"],
+                fg=self.colors["text_fg"]
+            ).pack()
+            
+            tk.Label(
+                amount_frame,
+                text=f"{self.controller.currency_symbol}{total_amount:.2f}",
+                font=big_amount_font,
+                bg=self.colors["payment_bg"],
+                fg=self.colors["payment_fg"]
+            ).pack()
+
+            # Progress bar for inserted vs required
+            prog_frame = tk.Frame(self.payment_window, bg=self.colors["payment_bg"])
+            prog_frame.pack(fill="x", pady=(10, 4), padx=40)
+            self.payment_progress = ttk.Progressbar(
+                prog_frame,
+                orient="horizontal",
+                mode="determinate",
+                maximum=max(total_amount, 1.0),
+                length=600
+            )
+            self.payment_progress.pack(fill="x", pady=6)
+            self.payment_progress_label = tk.Label(
+                prog_frame,
+                text=f"0.00 / {self.controller.currency_symbol}{total_amount:.2f}",
+                font=("Helvetica", 14, "bold"),
+                bg=self.colors["payment_bg"],
+                fg="#0f172a"
+            )
+            self.payment_progress_label.pack()
+
+            # Change availability notice
+            try:
+                change_stock = self.controller.get_coin_change_stock()
+                one_available = int(change_stock.get("one_peso", {}).get("count", 0))
+                five_available = int(change_stock.get("five_peso", {}).get("count", 0))
+                change_ok = (one_available > 0) or (five_available > 0)
+            except Exception:
+                change_ok = True
+                one_available = five_available = 0
+            # Show warning if either hopper is empty (out of stock for that denomination)
+            one_empty = one_available <= 0
+            five_empty = five_available <= 0
+            if one_empty or five_empty:
+                tk.Label(
+                    amount_frame,
+                    text="Please insert exact amount — change unavailable",
+                    font=("Helvetica", 16, "bold"),
+                    bg=self.colors["payment_bg"],
+                    fg="#e11d48"
+                ).pack(pady=(6, 8))
+            
+            # Payment status
+            status_frame = tk.Frame(self.payment_window, bg=self.colors["payment_bg"])
+            status_frame.pack(fill="x", pady=20)
+            
+            self.payment_status = tk.Label(
+                status_frame,
+                text="Coins: {0}0.00 | Bills: {0}0.00\nTotal Received: {0}0.00\nRemaining: {0}{1:.2f}".format(self.controller.currency_symbol, total_amount),
+                font=big_status_font,
+                bg=self.colors["payment_bg"],
+                fg=self.colors["payment_fg"],
+                justify=tk.LEFT,
+                anchor='w',
+                wraplength=payment_wraplength
+            )
+            self.payment_status.pack()
+
+            self.cancel_warning_label = tk.Label(
+                status_frame,
+                text="Warning: Canceling will NOT return inserted coins or bills.",
+                font=tkfont.Font(family="Helvetica", size=18, weight="bold"),
+                bg=self.colors["payment_bg"],
+                fg="#c0392b",
+                justify=tk.LEFT,
+                anchor='w',
+                wraplength=payment_wraplength
+            )
+            self.cancel_warning_label.pack(pady=(10, 0))
+
+            # Options (placed higher for easier touch access)
+            options_frame = tk.Frame(self.payment_window, bg=self.colors["payment_bg"])
+            options_frame.pack(fill="x", padx=36, pady=(8, 12))
+
+            back_btn = tk.Button(
+                options_frame,
+                text="Back to Shopping",
+                font=section_title_font,
+                command=self.back_to_shopping_from_payment,
+                bg=self.colors["primary_btn_bg"],
+                fg="#ffffff",
+                activebackground=self.colors["primary_btn_hover"],
+                activeforeground="#ffffff",
+                relief="flat"
+            )
+            back_btn.pack(side="left", expand=True, fill="x", padx=(0, 8))
+            self._style_button(back_btn, hover_bg=self.colors["primary_btn_hover"])
+
+            cancel_btn = tk.Button(
+                options_frame,
+                text="Cancel Payment",
+                font=section_title_font,
+                command=self.confirm_cancel_payment,
+                bg=self.colors["secondary_btn_bg"],
+                fg="#ffffff",
+                activebackground=self.colors["secondary_btn_hover"],
+                activeforeground="#ffffff",
+                relief="flat"
+            )
+            cancel_btn.pack(side="left", expand=True, fill="x", padx=(8, 0))
+            self._style_button(cancel_btn, hover_bg=self.colors["secondary_btn_hover"])
+            
+            # Change status (initially hidden)
+            self.change_label = tk.Label(
+                status_frame,
+                text="",
+                font=section_title_font,
+                bg=self.colors["payment_bg"],
+                fg=self.colors["payment_fg"]
+            )
+            self.change_label.pack_forget()  # Hidden until change is dispensed
+
+            self.change_progress_label = tk.Label(
+                status_frame,
+                text="",
+                font=tkfont.Font(family="Helvetica", size=18),
+                bg=self.colors["payment_bg"],
+                fg=self.colors["text_fg"],
+                justify=tk.LEFT,
+                anchor='w'
+            )
+            self.change_progress_label.pack_forget()  # Hidden until first pulse update
+            
+            # Accepted coins info
+            tk.Label(
+                self.payment_window,
+                text="Accepted Payment Methods:",
+                font=section_title_font,
+                bg=self.colors["payment_bg"],
+                fg=self.colors["text_fg"]
+            ).pack(pady=(12, 5))
+            
+            coins_text = (
+                f"Coins: {self.controller.currency_symbol}1, {self.controller.currency_symbol}5, {self.controller.currency_symbol}10 (Old and New)\n"
+                f"Bills: {self.controller.currency_symbol}20, {self.controller.currency_symbol}50, {self.controller.currency_symbol}100"
+            )
+            
+            tk.Label(
+                self.payment_window,
+                text=coins_text,
+                font=tkfont.Font(family="Helvetica", size=16),
+                bg=self.colors["payment_bg"],
+                fg=self.colors["text_fg"],
+                justify=tk.LEFT,
+                wraplength=payment_wraplength,
+                anchor='w'
+            ).pack()
+
+            # Items to be paid (uses lower available space in fullscreen mode).
+            items_section = tk.Frame(self.payment_window, bg=self.colors["payment_bg"])
+            items_section.pack(fill="both", expand=True, padx=36, pady=(18, 8))
+
+            tk.Label(
+                items_section,
+                text="Items to be Paid:",
+                font=section_title_font,
+                bg=self.colors["payment_bg"],
+                fg=self.colors["text_fg"],
+                anchor="w"
+            ).pack(fill="x", pady=(0, 6))
+
+            items_list_lines = []
+            for entry in self.controller.cart:
+                item_data = entry.get("item", {})
+                item_name = item_data.get("name", "Unknown Item")
+                qty = int(entry.get("quantity", 0) or 0)
+                unit_price = float(item_data.get("price", 0.0) or 0.0)
+                line_total = qty * unit_price
+                slot_no = item_data.get("_slot_number")
+                slot_text = f" (Slot {slot_no})" if slot_no is not None else ""
+                items_list_lines.append(
+                    f"- {item_name}{slot_text}  x{qty}  =  {self.controller.currency_symbol}{line_total:.2f}"
+                )
+
+            items_text = "\n".join(items_list_lines) if items_list_lines else "- No items in cart"
+            self.payment_items_label = tk.Label(
+                items_section,
+                text=items_text,
+                font=item_list_font,
+                bg="#ffffff",
+                fg=self.colors["text_fg"],
+                justify="left",
+                anchor="nw",
+                wraplength=max(760, payment_wraplength),
+                padx=16,
+                pady=12,
+                relief="solid",
+                bd=1
+            )
+            self.payment_items_label.pack(fill="both", expand=True)
+            
+            # Start updating payment status
+            self.update_payment_status(total_amount)
+            
+            # Handle window close button
+            self.payment_window.protocol("WM_DELETE_WINDOW", self.cancel_payment)
+            
+        else:
+            self.complete_payment()
+    
+    def update_payment_status(self, total_amount):
+        """Update the payment status window with current coin and bill totals"""
+        if self.payment_in_progress:
+            received = self.payment_handler.get_current_amount()
+            
+            # Get individual amounts with proper None checks
+            coin_amount = 0.0
+            if self.payment_handler.coin_acceptor:
+                try:
+                    coin_amount = self.payment_handler.coin_acceptor.get_received_amount()
+                except Exception as e:
+                    print(f"[CartScreen] Error getting coin amount: {e}")
+            
+            bill_amount = 0.0
+            if self.payment_handler.bill_acceptor:
+                try:
+                    bill_amount = self.payment_handler.bill_acceptor.get_received_amount()
+                except Exception as e:
+                    print(f"[CartScreen] Error getting bill amount: {e}")
+            
+            if received != self.payment_received:  # Only update if amount changed
+                self.payment_received = received
+                self.coin_received = coin_amount
+                self.bill_received = bill_amount
+                remaining = total_amount - received
+                
+                if remaining >= 0:
+                    remaining_text = f"Remaining: {self.controller.currency_symbol}{remaining:.2f}"
+                else:
+                    remaining_text = f"Change Due: {self.controller.currency_symbol}{abs(remaining):.2f}"
+                
+                status_text = (
+                    f"Coins: {self.controller.currency_symbol}{coin_amount:.2f} | Bills: {self.controller.currency_symbol}{bill_amount:.2f}\n"
+                    f"Total Received: {self.controller.currency_symbol}{received:.2f}\n"
+                    f"{remaining_text}"
+                )
+                
+                self.payment_status.config(text=status_text)
+                if received > 0:
+                    self.cancel_warning_label.config(
+                        text=(
+                            "Warning: Canceling will NOT return inserted "
+                            "coins or bills."
+                        )
+                    )
+                
+                if received >= total_amount:
+                    self._schedule_complete_payment()
+                    return
+                    
+            # Update every 100ms while payment is in progress
+            self.after(100, lambda: self.update_payment_status(total_amount))
+
+    def _schedule_complete_payment(self, delay_ms=120):
+        """Schedule payment completion once, allowing UI to show the final inserted amount."""
+        if self.payment_completion_scheduled or not self.payment_in_progress:
+            return
+        self.payment_completion_scheduled = True
+
+        def _run_complete():
+            self._complete_after_id = None
+            if self.payment_in_progress:
+                self.complete_payment()
+
+        try:
+            self._complete_after_id = self.after(delay_ms, _run_complete)
+        except Exception:
+            _run_complete()
+
+    def _on_payment_update(self, amount):
+        """Callback invoked by PaymentHandler when coins/bills change (push notification).
+
+        The handler passes the combined received amount. Schedule UI update on the
+        main thread using `after(0, ...)` so Tkinter updates are safe.
+        """
+        if not self.payment_in_progress:
+            return
+
+        coin_amount = 0.0
+        try:
+            if self.payment_handler.coin_acceptor:
+                coin_amount = self.payment_handler.coin_acceptor.get_received_amount()
+        except Exception as e:
+            print(f"[PAYMENT] Error getting coin amount: {e}")
+            coin_amount = 0.0
+        
+        bill_amount = 0.0
+        try:
+            if self.payment_handler.bill_acceptor:
+                bill_amount = self.payment_handler.bill_acceptor.get_received_amount()
+        except Exception as e:
+            print(f"[PAYMENT] Error getting bill amount: {e}")
+            bill_amount = 0.0
+
+        # Prepare UI values
+        self.payment_received = amount
+        self.coin_received = coin_amount
+        self.bill_received = bill_amount
+        remaining = self.payment_required - amount
+
+        if remaining >= 0:
+            remaining_text = f"Remaining: {self.controller.currency_symbol}{remaining:.2f}"
+        else:
+            remaining_text = f"Change Due: {self.controller.currency_symbol}{abs(remaining):.2f}"
+
+        status_text = (
+            f"Coins: {self.controller.currency_symbol}{coin_amount:.2f} | Bills: {self.controller.currency_symbol}{bill_amount:.2f}\n"
+            f"Total Received: {self.controller.currency_symbol}{amount:.2f}\n"
+            f"{remaining_text}"
+        )
+
+        print(f"[PAYMENT UPDATE] Coins: {coin_amount}, Bills: {bill_amount}, Total: {amount}, Required: {self.payment_required}")
+
+        # Schedule UI work on the main thread
+        def _apply_update():
+            try:
+                self.payment_status.config(text=status_text)
+                if getattr(self, "payment_progress", None):
+                    try:
+                        self.payment_progress["value"] = max(0.0, float(amount))
+                        self.payment_progress_label.config(
+                            text=f"{self.controller.currency_symbol}{amount:.2f} / {self.controller.currency_symbol}{self.payment_required:.2f}"
+                        )
+                    except Exception:
+                        pass
+                if amount > 0 and getattr(self, "cancel_warning_label", None):
+                    self.cancel_warning_label.config(
+                        text=(
+                            "Warning: Canceling will NOT return inserted "
+                            "coins or bills."
+                        )
+                    )
+            except Exception as e:
+                print(f"[PAYMENT] Error updating UI: {e}")
+
+            if amount >= self.payment_required:
+                print(f"[PAYMENT] Payment complete threshold reached: {amount} >= {self.payment_required}")
+                self._schedule_complete_payment()
+
+        try:
+            self.after(0, _apply_update)
+        except Exception as e:
+            print(f"[PAYMENT] Error scheduling UI update: {e}")
+
+    def update_change_status(self, message):
+        """Update the change dispensing status display."""
+        def _apply_change_status():
+            # Ignore repeated identical messages to avoid UI flicker.
+            if message == self.last_change_status:
+                return
+            self.last_change_status = message
+
+            if self.change_label:
+                self.change_label.config(text=message)
+                self.change_label.pack()  # Make visible
+            # Show parsed live pulse progress (x/y) from hopper callback lines.
+            if self.change_progress_label:
+                pulse_match = re.search(r'PULSE\s+(ONE|FIVE)\s+(\d+)\s*/\s*(\d+)', str(message), re.IGNORECASE)
+                if pulse_match:
+                    denom = pulse_match.group(1).upper()
+                    current = pulse_match.group(2)
+                    target = pulse_match.group(3)
+                    value = f"{self.controller.currency_symbol}1" if denom == "ONE" else f"{self.controller.currency_symbol}5"
+                    self.change_progress_label.config(
+                        text=f"Dispense progress ({value}): {current}/{target}"
+                    )
+                    self.change_progress_label.pack()
+                else:
+                    upper = str(message).upper()
+                    if "CHANGE DISPENSED" in upper:
+                        self.change_progress_label.config(text="Dispense progress: Completed")
+                        self.change_progress_label.pack()
+                    elif "ERROR" in upper or "NO COIN" in upper or "TIMEOUT" in upper:
+                        self.change_progress_label.config(text="Dispense progress: Stopped")
+                        self.change_progress_label.pack()
+
+            # Show explicit alert when hopper reports no-coin timeout.
+            if message and not self.change_alert_shown:
+                upper = message.upper()
+                if "NO COIN" in upper and "TIMEOUT" in upper:
+                    self.change_alert_shown = True
+                    try:
+                        messagebox.showwarning("Change Hopper Alert", message)
+                    except Exception:
+                        pass
+            # Force redraw so change status is visible during synchronous dispense loop.
+            try:
+                if self.payment_window and self.payment_window.winfo_exists():
+                    self.payment_window.update_idletasks()
+            except Exception:
+                pass
+
+        try:
+            # If callback runs on UI thread (common during stop_payment_session),
+            # apply immediately so status is not delayed until after window closes.
+            if threading.current_thread() is threading.main_thread():
+                _apply_change_status()
+            else:
+                self.after(0, _apply_change_status)
+        except Exception:
+            _apply_change_status()
+
+    def complete_payment(self):
+        """Complete the payment process and dispense items & change"""
+        if not self.payment_in_progress or getattr(self, "payment_finalized", False):
+            return
+             
+        self.payment_in_progress = False
+        self.payment_completion_scheduled = False
+        self._vend_started = False
+        if self._complete_after_id:
+            try:
+                self.after_cancel(self._complete_after_id)
+            except Exception:
+                pass
+            self._complete_after_id = None
+
+        thread_args = (
+            self.payment_required,
+            list(self.controller.cart),
+            self.coin_received,
+            self.bill_received,
+            self.buyer_info
+        )
+        threading.Thread(target=self._complete_payment_thread, args=thread_args, daemon=True).start()
+
+    def _complete_payment_thread(self, required_amount, cart_snapshot, coin_amount, bill_amount, buyer_info):
+        try:
+            received, change_dispensed, change_status = self.payment_handler.stop_payment_session(
+                required_amount=required_amount
+            )
+        except Exception as e:
+            # Never leave payment UI hanging if hardware/session finalization fails.
+            try:
+                print(f"[CartScreen] ERROR during stop_payment_session: {e}")
+            except Exception:
+                pass
+            received = self.payment_received
+            change_dispensed = 0
+            change_status = f"Error finalizing payment: {e}"
+        self.after(0, lambda: self._present_payment_complete(
+            required_amount,
+            received,
+            change_dispensed,
+            change_status,
+            cart_snapshot,
+            coin_amount,
+            bill_amount,
+            None,
+            buyer_info
+        ))
+
+    def _present_payment_complete(self, required_amount, received, change_dispensed,
+                                  change_status, cart_snapshot, coin_amount, bill_amount, or_number=None, buyer_info=None):
+        if getattr(self, "payment_finalized", False):
+            return
+        self.payment_finalized = True
+        # One-vend token to avoid duplicate dispensing on rare double-calls
+        if not hasattr(self, "_vend_token"):
+            self._vend_token = None
+        import time as _t
+        current_token = f"{_t.time():.6f}"
+        if self._vend_token is None:
+            self._vend_token = current_token
+        elif self._vend_token != current_token:
+            return
+        try:
+            vend_list = [ {"item": it["item"], "quantity": it["quantity"]} for it in cart_snapshot ]
+        except Exception:
+            vend_list = []
+
+        change_due = max(0.0, float(received) - float(required_amount))
+        # Track actual dispensed change in coin inventory for admin monitoring.
+        try:
+            if float(change_dispensed) > 0 and hasattr(self.controller, "record_change_dispensed"):
+                self.controller.record_change_dispensed(change_dispensed)
+        except Exception as e:
+            print(f"[CartScreen] Failed to record change dispense in coin stock: {e}")
+
+        status_text = (
+            "Thank you!\n\n"
+            f"Coins received: {self.controller.currency_symbol}{coin_amount:.2f}\n"
+            f"Bills received: {self.controller.currency_symbol}{bill_amount:.2f}\n"
+            f"Total paid: {self.controller.currency_symbol}{received:.2f}\n"
+            "\nYour items will now be dispensed."
+        )
+        if change_due > 0:
+            status_text += (
+                f"\n\nChange due: {self.controller.currency_symbol}{change_due:.2f}\n"
+                f"Change dispensed: {self.controller.currency_symbol}{float(change_dispensed):.2f}"
+            )
+            if change_status:
+                status_text += f"\n{change_status}"
+                upper = str(change_status).upper()
+                if (not self.change_alert_shown) and ("NO COIN" in upper and "TIMEOUT" in upper):
+                    self.change_alert_shown = True
+                    try:
+                        messagebox.showwarning("Change Hopper Alert", change_status)
+                    except Exception:
+                        pass
+
+        self._destroy_payment_window()
+
+        or_number_value = or_number
+
+        if or_number_value:
+            status_text += f"\n\nOR: {or_number_value}"
+
+        def _after_vend():
+            try:
+                if getattr(self, "_dispense_check_labels", None):
+                    for lbl in self._dispense_check_labels:
+                        try:
+                            lbl.config(fg="#16a34a", text="✓ " + lbl.cget("text").lstrip("• ").strip())
+                        except Exception:
+                            pass
+                    try:
+                        self.after(1200, self._close_dispense_wait_popup)
+                    except Exception:
+                        self._close_dispense_wait_popup()
+                else:
+                    self._close_dispense_wait_popup()
+            except Exception:
+                self._close_dispense_wait_popup()
+            try:
+                self.controller.apply_cart_stock_deductions(cart_snapshot)
+            except Exception as e:
+                print(f"[CartScreen] Error applying stock deductions: {e}")
+
+            # Prompt for post-transaction issue report (optional)
+            try:
+                issue = self._prompt_issue_report(or_number_value)
+                if issue:
+                    logger = get_logger()
+                    logger.log_event(
+                        "ISSUE",
+                        f"OR: {or_number_value or 'N/A'} | Issue: {issue}"
+                    )
+            except Exception as e:
+                print(f"[CartScreen] Error capturing issue report: {e}")
+
+            # Reset buyer info after successful transaction
+            self.buyer_info = None
+            
+            # Clear cart and return to kiosk screen
+            self.controller.clear_cart()
+            # Show completion notice and auto-return after issue prompt handling
+            self._show_payment_complete_notice(status_text, auto_return_ms=10000)
+            self._schedule_return_to_start_order(delay_ms=10000)
+
+        def _vend_items_and_finish():
+            try:
+                # Use organized vending so slots are processed in ascending order.
+                if not getattr(self, "_vend_started", False):
+                    self._vend_started = True
+                    self.controller.vend_cart_items_organized(vend_list)
+            except Exception as e:
+                print(f"Error in vending thread: {e}")
+            finally:
+                try:
+                    self.after(0, _after_vend)
+                except Exception:
+                    _after_vend()
+
+        def _log_and_record():
+            """Log transaction and record stock in background to keep UI snappy."""
+            def _extract_cart_entry_name_and_qty(entry):
+                if not isinstance(entry, dict):
+                    return "Unknown", 1
+                qty = entry.get('quantity', 1)
+                try:
+                    qty = int(qty)
+                except Exception:
+                    qty = 1
+                if qty <= 0:
+                    qty = 1
+                item_obj = entry.get('item') if isinstance(entry.get('item'), dict) else None
+                item_name = (item_obj or entry).get('name') if isinstance((item_obj or entry), dict) else None
+                if not item_name:
+                    item_name = "Unknown"
+                return item_name, qty
+
+            nonlocal or_number_value
+            try:
+                logger = get_logger()
+                items_to_log = []
+                for item in cart_snapshot:
+                    item_name, qty = _extract_cart_entry_name_and_qty(item)
+                    items_to_log.append({'name': item_name, 'quantity': qty})
+                or_logged = logger.log_transaction(
+                    items_list=items_to_log,
+                    coin_amount=coin_amount,
+                    bill_amount=bill_amount,
+                    change_dispensed=change_dispensed,
+                    buyer_program=buyer_info.get("program") if isinstance(buyer_info, dict) else None,
+                    buyer_year=buyer_info.get("year") if isinstance(buyer_info, dict) else None,
+                    buyer_section=buyer_info.get("section") if isinstance(buyer_info, dict) else None,
+                    or_number=or_number_value
+                )
+                if not or_number_value and or_logged:
+                    or_number_value = or_logged
+            except Exception as e:
+                print(f"[CartScreen] Error logging transaction: {e}")
+
+        if self.stock_tracker:
+            try:
+                for item in cart_snapshot:
+                    item_name, qty = _extract_cart_entry_name_and_qty(item)
+                    result = self.stock_tracker.record_sale(
+                        item_name=item_name,
+                        quantity=qty,
+                        coin_amount=coin_amount,
+                        bill_amount=bill_amount,
+                        change_dispensed=change_dispensed
+                    )
+                    if not result['success']:
+                        print(f"[CartScreen] Failed to record sale for {item_name}: {result['message']}")
+                    elif result['alert']:
+                        alert_msg = result['alert'].get('message', 'Stock low')
+                        print(f"[CartScreen] STOCK ALERT: {alert_msg}")
+                        messagebox.showwarning('Stock Alert', alert_msg)
+                    else:
+                        print(f"[CartScreen] Sale recorded for {item_name} (qty: {qty})")
+            except Exception as e:
+                print(f"[CartScreen] Error recording sales in stock tracker: {e}")
+
+        try:
+            self._show_dispense_wait_popup(cart_snapshot)
+            threading.Thread(target=_vend_items_and_finish, daemon=True).start()
+        except Exception:
+            _after_vend()
+        try:
+            threading.Thread(target=_log_and_record, daemon=True).start()
+        except Exception:
+            pass
+
+    def _cancel_scheduled_return_to_start_order(self):
+        """Cancel pending delayed navigation to Start Order, if any."""
+        if self._return_to_start_after_id:
+            try:
+                self.after_cancel(self._return_to_start_after_id)
+            except Exception:
+                pass
+            self._return_to_start_after_id = None
+
+    def _destroy_payment_complete_notice(self):
+        """Close payment-complete popup and cancel its countdown updates."""
+        if self._payment_notice_countdown_after_id:
+            try:
+                self.after_cancel(self._payment_notice_countdown_after_id)
+            except Exception:
+                pass
+            self._payment_notice_countdown_after_id = None
+        if self._payment_complete_notice:
+            try:
+                self._payment_complete_notice.destroy()
+            except Exception:
+                pass
+            self._payment_complete_notice = None
+
+    def _show_dispense_wait_popup(self, cart_snapshot=None):
+        """Display a blocking popup while items are vending."""
+        try:
+            self._close_dispense_wait_popup()
+        except Exception:
+            pass
+        try:
+            popup = tk.Toplevel(self)
+            popup.title("Dispensing Items")
+            popup.configure(bg="white")
+            popup.overrideredirect(True)
+            try:
+                popup.attributes("-fullscreen", True)
+            except Exception:
+                pass
+            try:
+                # Force full-coverage if fullscreen flag is ignored
+                w = popup.winfo_screenwidth()
+                h = popup.winfo_screenheight()
+                popup.geometry(f"{w}x{h}+0+0")
+            except Exception:
+                pass
+            popup.lift()
+            popup.attributes("-topmost", True)
+
+            header = tk.Frame(popup, bg="#1d4ed8", height=120)
+            header.pack(fill="x")
+            header.pack_propagate(False)
+            tk.Label(
+                header,
+                text="Dispensing items",
+                fg="white",
+                bg="#1d4ed8",
+                font=("Helvetica", 28, "bold")
+            ).pack(expand=True)
+
+            content = tk.Frame(popup, bg="white")
+            content.pack(expand=True, fill="both", pady=40, padx=40)
+            tk.Label(
+                content,
+                text="Please wait while we dispense your items.\nThis can take a few seconds.",
+                bg="white",
+                fg="#1f2a44",
+                font=("Helvetica", 20, "bold"),
+                justify="center"
+            ).pack(pady=18)
+
+            checklist_frame = tk.Frame(content, bg="white")
+            checklist_frame.pack(pady=10)
+            self._dispense_check_labels = []
+            self._dispense_check_index = 0
+            if isinstance(cart_snapshot, list) and cart_snapshot:
+                for entry in cart_snapshot:
+                    try:
+                        item_obj = entry.get("item", {})
+                        name = item_obj.get("name", "Item")
+                        qty = int(entry.get("quantity", 1))
+                    except Exception:
+                        name = "Item"
+                        qty = 1
+                    lbl = tk.Label(
+                        checklist_frame,
+                        text=f"• {name} x{qty}",
+                        font=("Helvetica", 16),
+                        bg="white",
+                        fg="#0f172a",
+                        anchor="w",
+                        justify="left"
+                    )
+                    lbl.pack(anchor="w")
+                    self._dispense_check_labels.append(lbl)
+
+            try:
+                status_zone = tk.Frame(popup, bg="#0f172a", height=260)
+                status_zone.pack(side="bottom", fill="x")
+                status_zone.pack_propagate(False)
+                SystemStatusPanel(status_zone, controller=self.controller, panel_height=260).pack(fill="both", expand=True)
+            except Exception:
+                pass
+
+            self._dispense_wait_popup = popup
+            try:
+                self.controller.dispense_progress_callback = self._on_dispense_progress
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[CartScreen] Failed to show dispense wait popup: {e}")
+
+    def _close_dispense_wait_popup(self):
+        popup = getattr(self, "_dispense_wait_popup", None)
+        if popup:
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+        self._dispense_wait_popup = None
+        self._dispense_check_labels = []
+        self._dispense_check_index = 0
+        try:
+            if hasattr(self.controller, "dispense_progress_callback"):
+                self.controller.dispense_progress_callback = None
+        except Exception:
+            pass
+
+    def _on_dispense_progress(self, item_name=None, slot=None):
+        """Mark next checklist entry as dispensed (green check)."""
+        try:
+            if not getattr(self, "_dispense_check_labels", None):
+                return
+            if self._dispense_check_index >= len(self._dispense_check_labels):
+                return
+            lbl = self._dispense_check_labels[self._dispense_check_index]
+            lbl.config(fg="#16a34a", text="✓ " + lbl.cget("text").lstrip("• ").strip())
+            self._dispense_check_index += 1
+        except Exception:
+            pass
+
+    def _show_payment_complete_notice(self, status_text, auto_return_ms=10000):
+        """Show a non-blocking completion popup while waiting for auto-return."""
+        self._destroy_payment_complete_notice()
+
+        popup = tk.Toplevel(self)
+        self._payment_complete_notice = popup
+        popup.title("Payment Complete")
+        popup.configure(bg=self.colors["payment_bg"])
+        try:
+            popup.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            popup.protocol("WM_DELETE_WINDOW", lambda: None)
+        except Exception:
+            pass
+
+        try:
+            popup.update_idletasks()
+            screen_w = popup.winfo_screenwidth()
+            screen_h = popup.winfo_screenheight()
+            popup.geometry(f"{screen_w}x{screen_h}+0+0")
+            popup.attributes("-fullscreen", True)
+        except Exception:
+            pass
+
+        header = tk.Frame(popup, bg="#1d4ed8")
+        header.pack(fill="x")
+        tk.Label(header, text="RAON VENDING", fg="white", bg="#1d4ed8",
+                 font=("Helvetica", 24, "bold")).pack(pady=8)
+        try:
+            status_panel = SystemStatusPanel(header, controller=self.controller, compact=True)
+            status_panel.pack(fill="x", padx=12, pady=(0, 8))
+        except Exception:
+            pass
+
+        tk.Label(
+            popup,
+            text="Payment Complete",
+            font=("Helvetica", 28, "bold"),
+            bg=self.colors["payment_bg"],
+            fg=self.colors["payment_fg"],
+        ).pack(pady=(24, 12))
+
+        tk.Label(
+            popup,
+            text=status_text,
+            font=tkfont.Font(family="Helvetica", size=18, weight="bold"),
+            bg=self.colors["payment_bg"],
+            fg=self.colors["text_fg"],
+            justify=tk.LEFT,
+            wraplength=max(900, int(screen_w * 0.85)) if 'screen_w' in locals() else 900,
+            anchor="w",
+        ).pack(fill="both", expand=True, padx=32, pady=(0, 16))
+
+        countdown_label = tk.Label(
+            popup,
+            text="",
+            font=tkfont.Font(family="Helvetica", size=16, weight="bold"),
+            bg=self.colors["payment_bg"],
+            fg=self.colors["payment_fg"],
+        )
+        countdown_label.pack(pady=(0, 8))
+
+        if auto_return_ms is not None and auto_return_ms > 0:
+            remaining_sec = max(1, int(auto_return_ms / 1000))
+        else:
+            remaining_sec = None
+
+        def _tick():
+            nonlocal remaining_sec
+            if not self._payment_complete_notice or not self._payment_complete_notice.winfo_exists():
+                self._payment_notice_countdown_after_id = None
+                return
+            if remaining_sec is None:
+                countdown_label.config(text="Press the home button to start a new order.")
+                self._payment_notice_countdown_after_id = None
+                return
+            countdown_label.config(text=f"Returning to Start Order in {remaining_sec} second(s)...")
+            if remaining_sec <= 1:
+                self._payment_notice_countdown_after_id = None
+                return
+            remaining_sec -= 1
+            self._payment_notice_countdown_after_id = self.after(1000, _tick)
+
+        if remaining_sec is not None:
+            _tick()
+
+    def _go_start_order_now(self):
+        """Navigate immediately to Start Order and clear pending auto-return state."""
+        self._cancel_scheduled_return_to_start_order()
+        self._destroy_payment_complete_notice()
+        try:
+            self.controller.show_start_order()
+        except Exception:
+            pass
+
+    def _schedule_return_to_start_order(self, delay_ms=10000):
+        """Auto-return to Start Order after payment completion."""
+        self._cancel_scheduled_return_to_start_order()
+
+        def _go_start_order():
+            self._return_to_start_after_id = None
+            self._go_start_order_now()
+
+        try:
+            self._return_to_start_after_id = self.after(int(delay_ms), _go_start_order)
+        except Exception:
+            _go_start_order()
+
+    def _destroy_payment_window(self):
+        """Safely destroy the payment status window."""
+        if hasattr(self, 'payment_window') and self.payment_window:
+            try:
+                self.payment_window.destroy()
+            except Exception:
+                pass
+            finally:
+                self.payment_window = None
+
+    def back_to_shopping_from_payment(self):
+        """Stop payment flow and return to kiosk shopping screen."""
+        self._cancel_payment_and_route(route="kiosk")
+
+    def confirm_cancel_payment(self):
+        """Ask for confirmation before canceling payment."""
+        try:
+            proceed = messagebox.askyesno(
+                "Confirm Cancel",
+                "Are you sure you want to cancel payment?",
+                parent=getattr(self, "payment_window", None),
+            )
+        except Exception:
+            proceed = True
+        if proceed:
+            self._cancel_payment_and_route(route="start_order")
+
+    def cancel_payment(self, event=None):
+        """Stop payment flow and return to start order screen."""
+        self._cancel_payment_and_route(route="start_order")
+
+    def _cancel_payment_and_route(self, route="start_order"):
+        """Cancel the current payment session.
+
+        This correctly handles the tuple returned by
+        PaymentHandler.stop_payment_session() which is
+        (total_received, change_amount, change_status).
+        The method will always close the payment window (if present)
+        and return the UI to the kiosk screen.
+        """
+        # Debug: log cancellation attempt
+        try:
+            print(f"DEBUG: cancel_payment called, route={route}, payment_in_progress={self.payment_in_progress}")
+        except Exception:
+            pass
+
+        # Ensure payment flag is reset even if exception occurs
+        try:
+            self._cancel_scheduled_return_to_start_order()
+            self._destroy_payment_complete_notice()
+            self.payment_completion_scheduled = False
+            if self._complete_after_id:
+                try:
+                    self.after_cancel(self._complete_after_id)
+                except Exception:
+                    pass
+                self._complete_after_id = None
+            # If a payment was in progress, stop it and handle returned tuple
+            if self.payment_in_progress:
+                try:
+                    total_received, change_amount, change_status = self.payment_handler.stop_payment_session()
+                except Exception:
+                    # Defensive: if the payment handler API changes or errors,
+                    # fall back to a safe default
+                    total_received = 0
+                    change_amount = 0
+                    change_status = ""
+        finally:
+            # Always reset the flag
+            self.payment_in_progress = False
+
+        # Ensure the payment window is closed and return to kiosk
+        self._destroy_payment_window()
+
+        try:
+            self.controller.finish_order_timer(status="CANCELLED")
+        except Exception:
+            pass
+
+        # Navigate based on selected option without extra prompt.
+        try:
+            if route == "kiosk":
+                self.controller.show_kiosk()
+            else:
+                self.controller.show_start_order()
+            try:
+                self.controller.focus_force()
+            except Exception:
+                pass
+        except Exception:
+            pass
+                
+    def on_closing(self):
+        """Handle cleanup when closing"""
+        if hasattr(self, 'payment_handler'):
+            self.payment_handler.cleanup()
+
+
+
