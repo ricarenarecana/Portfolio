@@ -42,11 +42,8 @@ This repository contains a collection of hardware, software, and automation proj
   - README.md
 
 ### Omron
-- eto-na (1).cxp
 - PICK AND PLACE SET AND RESET.cxp
-- UT2 FINAL.cxp
-- ut2-automation.cxp
-- UT2.cxp
+- Sort (metal&non-metal).cxp
 
 ### SodaBot
 - firmware/
