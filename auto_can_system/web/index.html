@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auto Can Robot Status</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --accent: #22d3ee;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --success: #10b981;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 20px;
+      background: radial-gradient(circle at 20% 20%, rgba(34,211,238,0.08), transparent 25%),
+                  radial-gradient(circle at 80% 0%, rgba(16,185,129,0.08), transparent 22%),
+                  var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    h1 { margin: 0 0 12px; letter-spacing: .5px; }
+    .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .card {
+      background: var(--panel);
+      border: 1px solid #1f2937;
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 12px 30px rgba(0,0,0,.35);
+    }
+    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+    .value { font-size: 24px; font-weight: 700; margin-top: 6px; }
+    .row { display: flex; gap: 10px; align-items: center; margin: 8px 0; }
+    .pill { padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; display: inline-block; }
+    .pill.success { background: rgba(16,185,129,.15); color: var(--success); }
+    .pill.warn { background: rgba(245,158,11,.15); color: var(--warn); }
+    .pill.danger { background: rgba(239,68,68,.15); color: var(--danger); }
+    .bins { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin-top: 6px; }
+    .bin { padding: 10px; border-radius: 10px; background: #0b1220; border: 1px solid #1f2937; }
+    .small { color: var(--muted); font-size: 12px; }
+    button { background: var(--accent); color: #0b1220; border: none; padding: 10px 14px; border-radius: 10px; font-weight: 700; cursor: pointer; }
+    button:hover { filter: brightness(1.05); }
+  </style>
+</head>
+<body>
+  <header class="row" style="justify-content: space-between;">
+    <div>
+      <h1>Auto Can Robot Status</h1>
+      <div class="small">Live view; data pulls from <code>status.json</code>. Replace fetch URL to point at your bridge.</div>
+    </div>
+    <button id="refresh">Refresh</button>
+  </header>
+
+  <section class="grid">
+    <div class="card">
+      <div class="label">State</div>
+      <div class="value" id="state">--</div>
+      <div class="row">
+        <div class="label">Can Index</div>
+        <div class="pill" id="canIdx">--</div>
+      </div>
+      <div class="row">
+        <div class="label">Link</div>
+        <div class="pill warn" id="link">--</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">TOF Distance</div>
+      <div class="value" id="tof">--</div>
+      <div class="small" id="obstacle">Obstacle: --</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Bins</div>
+      <div class="bins">
+        <div class="bin">
+          <div class="label">Bin 1</div>
+          <div class="value" id="bin1">--</div>
+        </div>
+        <div class="bin">
+          <div class="label">Bin 2</div>
+          <div class="value" id="bin2">--</div>
+        </div>
+        <div class="bin">
+          <div class="label">Bin 3</div>
+          <div class="value" id="bin3">--</div>
+        </div>
+      </div>
+      <div class="small" id="updated">Updated: --</div>
+    </div>
+  </section>
+
+  <script>
+    const statusUrl = 'sample_status.json'; // point to live endpoint
+
+    function updateView(data) {
+      const binVal = (n)=> data.limit[n] ? 'Stored' : 'Empty';
+      document.getElementById('state').textContent = data.state;
+      document.getElementById('canIdx').textContent = data.can_index + 1;
+      document.getElementById('link').textContent = data.link_ok ? 'OK' : 'LOST';
+      document.getElementById('link').className = 'pill ' + (data.link_ok ? 'success' : 'danger');
+      document.getElementById('tof').textContent = `${(data.tof_mm/10).toFixed(1)} cm`;
+      document.getElementById('obstacle').textContent = `Obstacle: ${data.obstacle ? 'YES' : 'No'}`;
+      document.getElementById('bin1').textContent = binVal(0);
+      document.getElementById('bin2').textContent = binVal(1);
+      document.getElementById('bin3').textContent = binVal(2);
+      document.getElementById('bin1').style.color = data.limit[0] ? '#10b981' : '#9ca3af';
+      document.getElementById('bin2').style.color = data.limit[1] ? '#10b981' : '#9ca3af';
+      document.getElementById('bin3').style.color = data.limit[2] ? '#10b981' : '#9ca3af';
+      document.getElementById('updated').textContent = `Updated: ${data.updated_at}`;
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch(statusUrl + '?t=' + Date.now());
+        const data = await res.json();
+        updateView(data);
+      } catch (e) {
+        console.error(e);
+        document.getElementById('link').textContent = 'ERR';
+        document.getElementById('link').className = 'pill danger';
+      }
+    }
+
+    document.getElementById('refresh').addEventListener('click', fetchStatus);
+    fetchStatus();
+    setInterval(fetchStatus, 2000);
+  </script>
+</body>
+</html>
